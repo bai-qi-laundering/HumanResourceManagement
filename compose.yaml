@@ -1,0 +1,54 @@
+services:
+  hr:
+    build: .
+    container_name: baiqi-hr
+    restart: unless-stopped
+    user: "${HR_UID:?Fill NAS uid}:${HR_GID:?Fill NAS gid}"
+    ports:
+      - "${NAS_LAN_IP:?Fill NAS LAN IP}:8090:8090"
+    environment:
+      HR_DATA_DIR: /data
+      HR_ALLOWED_CIDRS: "${OFFICE_CIDRS:?Fill office subnet}"
+      HR_ALLOWED_HOSTS: "${NAS_LAN_IP}"
+      HR_BLOCKED_SOURCE_IPS: "${NAS_LAN_IP}"
+      HR_IDENTITY_DIR: /documents/identity
+      HR_BANK_DIR: /documents/bank
+      HR_LICENSE_DIR: /documents/license
+      HR_GAS_URL: "${HR_GAS_URL:-}"
+      HR_GAS_SECRET: "${HR_GAS_SECRET:-}"
+    volumes:
+      - type: bind
+        source: ${HR_DATA_PATH:?Fill data folder}
+        target: /data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${NAS_IDENTITY_PATH:?Fill identity folder}
+        target: /documents/identity
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${NAS_BANK_PATH:?Fill bank folder}
+        target: /documents/bank
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${NAS_LICENSE_PATH:?Fill license folder}
+        target: /documents/license
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"

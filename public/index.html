@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>百麒｜人資管理</title><link rel="stylesheet" href="/styles.css"><script defer src="/app.js"></script></head>
+<body>
+<header><div class="brand"><span class="brand-mark">麒</span><div><strong>百麒人資管理</strong><small>HUMAN RESOURCES</small></div></div><div class="header-right"><span class="network">公司內網限定</span><button id="refresh" class="quiet" type="button">重新整理</button></div></header>
+<div class="shell"><aside><nav id="navigation" aria-label="主要頁面"></nav><div class="aside-foot">人事資料存於 NAS<br>共同帳號・內部使用</div></aside><main><div id="message" role="status" hidden></div><div id="content"><div class="empty">正在讀取 NAS 人事資料…</div></div></main></div>
+<dialog id="form-dialog"><form id="edit-form"><div class="dialog-heading"><h2 id="dialog-title"></h2><button type="button" id="close-dialog" class="quiet" aria-label="關閉">✕</button></div><div id="form-fields"></div><p id="form-error" class="form-error" role="alert"></p><div class="dialog-actions"><button type="button" id="cancel-dialog" class="quiet">取消</button><button type="submit" id="save-form">儲存</button></div></form></dialog>
+<dialog id="preview-dialog"><div class="dialog-heading"><h2 id="preview-title">文件預覽</h2><button type="button" id="close-preview" class="quiet">關閉</button></div><div id="preview-content"></div><p class="muted">檔案留在 NAS 原資料夾；離開公司後不能重新讀取。已截圖或另存的副本不受此限制。</p></dialog>
+</body></html>
