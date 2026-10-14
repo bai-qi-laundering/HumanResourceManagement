@@ -1,0 +1,15 @@
+const fs=require('node:fs'),vm=require('node:vm'),crypto=require('node:crypto'),assert=require('node:assert/strict');
+const secret='unit-test-key-not-for-deployment-1234567890',cache=new Map();let reads=0;
+const result=text=>({value:JSON.parse(text),setMimeType(){return this;}});
+const employeeRows=[['編號','姓名','LINE','部門','聘僱型','','離職日','到職日'],['TEST001','測試員工','not-exported-line-id','摺疊','正職','','','2026/01/01']];
+const salaryRows=[['月份','最後打卡','編號','姓名','部門','型態','工時','加班1','加班2','加班費','保費','實發'],['2026/10','','TEST001','測試員工','摺疊','正職','176','2','0','500','1000','30,000'],['2026/10/01','日明細','—','08:00','17:00','','8','0','0','0','0','0']];
+const sheets={'員工資料':{getDataRange:()=>({getDisplayValues:()=>employeeRows.map(r=>r.slice())})},'薪資計算明細':{getDataRange:()=>({getDisplayValues:()=>salaryRows.map(r=>r.slice())})}};
+const env={Date,Set,JSON,Number,String,Math,ContentService:{createTextOutput:result,MimeType:{JSON:'json'}},PropertiesService:{getScriptProperties:()=>({getProperty:()=>secret})},Utilities:{computeHmacSha256Signature:(text,key)=>Array.from(crypto.createHmac('sha256',key).update(text).digest()),formatDate:date=>date.toISOString().slice(0,10)},CacheService:{getScriptCache:()=>({get:key=>cache.get(key),put:(key,value)=>cache.set(key,value)})},LockService:{getScriptLock:()=>({tryLock:()=>true,releaseLock(){}})},baiqiLeaderSS_:()=>{reads++;return {getSheetByName:name=>sheets[name]};}};
+vm.createContext(env);vm.runInContext(fs.readFileSync('integration/HrExport.gs','utf8'),env);
+const timestamp=Math.floor(Date.now()/1000),nonce='a'.repeat(32),sign=(stamp,n)=>crypto.createHmac('sha256',secret).update(stamp+'|'+n).digest('hex');
+assert.equal(env.baiqiHrExport_({timestamp,nonce,signature:'b'.repeat(64)}).value.success,false);assert.equal(reads,0);
+assert.equal(env.baiqiHrExport_({timestamp:timestamp-1000,nonce,signature:sign(timestamp-1000,nonce)}).value.success,false);assert.equal(reads,0);
+const request={timestamp,nonce,signature:sign(timestamp,nonce)},exported=env.baiqiHrExport_(request).value;
+assert.equal(exported.success,true);assert.equal(exported.data.employees[0].lineBound,'已綁定');assert(!JSON.stringify(exported).includes('not-exported-line-id'));assert.equal(exported.data.salaries.length,1);assert.equal(exported.data.salaries[0].netPay,30000);assert.equal(exported.data.employees[0].arrivalDate,'2026-01-01');
+assert.equal(env.baiqiHrExport_(request).value.success,false);assert.equal(reads,1);
+console.log('PASS: GAS HMAC accepts valid requests, rejects bad/expired/replayed signatures before data reads, exports salary summary only, excludes LINE IDs.');
