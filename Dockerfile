@@ -6,4 +6,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY server.py ./
 COPY public ./public
 EXPOSE 8090
-CMD ["gunicorn", "server:application", "--bind", "0.0.0.0:8090", "--workers", "1", "--threads", "4", "--timeout", "120", "--forwarded-allow-ips", "", "--error-logfile", "-"]
+CMD ["gunicorn", "server:application", "--bind", "0.0.0.0:8090", "--workers", "1", "--threads", "4", "--timeout", "120", "--forwarded-allow-ips=", "--error-logfile", "-"]
