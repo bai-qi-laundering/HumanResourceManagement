@@ -18,7 +18,18 @@ echo '開始更新人資文件上傳及徵人功能'
 STAGE_DIR=$(mktemp -d)
 trap 'rm -rf "$STAGE_DIR"' EXIT HUP INT TERM
 curl --fail --location --retry 2 --proto '=https' "https://github.com/bai-qi-laundering/HumanResourceManagement/archive/$UPDATE_REF.zip" -o "$STAGE_DIR/source.zip"
-unzip -q "$STAGE_DIR/source.zip" -d "$STAGE_DIR"
+# DSM may not provide unzip. Use Python from the already installed HR image.
+CURRENT_IMAGE=$(docker inspect -f '{{.Image}}' baiqi-hr)
+docker run --rm --network none --read-only --user 0:0 --cap-drop ALL \
+  --mount "type=bind,source=$STAGE_DIR,target=/update" \
+  --entrypoint python "$CURRENT_IMAGE" -c '
+import zipfile
+with zipfile.ZipFile("/update/source.zip") as archive:
+    if sum(item.file_size for item in archive.infolist()) > 50 * 1024 * 1024:
+        raise SystemExit("更新檔案大小異常，原程式未變更")
+    archive.extractall("/update")
+print("更新檔案解壓完成")
+'
 SOURCE_DIR="$STAGE_DIR/HumanResourceManagement-$UPDATE_REF"
 [ -f "$SOURCE_DIR/server.py" ] && [ -f "$SOURCE_DIR/compose.yaml" ] || { echo '下載內容不完整，原程式未變更'; exit 1; }
 if docker compose version >/dev/null 2>&1; then
