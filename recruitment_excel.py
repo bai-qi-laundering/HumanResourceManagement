@@ -81,6 +81,7 @@ def read_excel(raw, filename, start, end):
     else:
         raise ValueError('請選Excel .xlsx或.xls檔，捷徑.lnk不含資料')
     records, skipped, context_year, context_month = [], 0, None, None
+    warnings = []
     try:
         for title, rows in sheets:
             first_month = re.search(r'(\d{1,2})月', title)
@@ -97,9 +98,17 @@ def read_excel(raw, filename, start, end):
                     labels = [re.sub(r'\s+', '', text(v)) for v in row]
                     if any(k in labels for k in ALIASES['name']) and any(k in labels for k in ALIASES['phone']):
                         header = {k: next((labels.index(a) for a in aliases if a in labels), -1) for k, aliases in ALIASES.items()}
-                    if index >= 10 and header is None:
-                        break
-                    continue
+                        continue
+                    # Recognize the user's standard date-prefixed ten-column export,
+                    # including its FIRST row. Do not infer dates from interview time.
+                    if len(row) == 10 and parse_day(row[0]) and re.fullmatch(r'[\w\u3400-\u9fff·．・\s-]{2,30}', text(row[1])) and re.fullmatch(r'09\d{8}', re.sub(r'[\s()-]', '', text(row[2]))):
+                        header = dict(zip(['date', 'name', 'phone', 'job', 'gender', 'age', 'interviewAt', 'notes', 'source', 'callTime'], range(10)))
+                        header['again'] = -1
+                        warnings.append(title + '沒有標題列，依日期／姓名／電話／職缺／性別／年齡／面試時間／備註／來源／撥打時間辨識，請預覽核對')
+                    else:
+                        if index >= 10:
+                            break
+                        continue
                 values = {k: row[c] if 0 <= c < len(row) else None for k, c in header.items()}
                 if header['date'] >= 0 and parse_day(values['date']):
                     current_day = parse_day(values['date'])
@@ -122,4 +131,8 @@ def read_excel(raw, filename, start, end):
     finally:
         if hasattr(book, 'close'):
             book.close()
-    return {'schema': 'baiqi-recruitment', 'version': 1, 'startDate': start, 'endDate': end, 'records': records, 'warnings': [f'{skipped}列沒有可確認的範圍內日期，未納入'] if skipped else []}
+    if skipped:
+        warnings.append(f'{skipped}列沒有可確認的範圍內日期，未納入')
+    if not records:
+        raise ValueError('沒有可匯入紀錄：請檢查日期範圍及姓名、電話標題；無標題檔請使用日期／姓名／電話等10欄格式')
+    return {'schema': 'baiqi-recruitment', 'version': 1, 'startDate': start, 'endDate': end, 'records': records, 'warnings': warnings}

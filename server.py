@@ -155,6 +155,9 @@ class Store:
                 if body.get('revision') != old['revision']:
                     raise Problem('資料已被其他電腦更新，請重新載入後編輯', 409)
                 revision = old['revision'] + 1
+                previous = json.loads(old['data'])
+                if previous.get('arrivalDateSource'):
+                    data['arrivalDateSource'] = previous['arrivalDateSource'] if data['arrivalDate'] == previous.get('arrivalDate') else {'type': '人工修正', 'at': now()}
                 db.execute('UPDATE employees SET data=?,revision=? WHERE id=?', (compact(data), revision, employee_id))
             else:
                 if body.get('revision'):
@@ -327,6 +330,7 @@ class Store:
         with self.db() as db:
             people = [self.employee(db, r[0]) for r in db.execute('SELECT id FROM employees').fetchall()]
             old = {r[0] for r in db.execute('SELECT id FROM leave_import_rows')}
+            arrival_plan = self.leave_arrival_plan(db, rows)
         arrivals = {}
         for row in rows:
             if row['arrivalDate']:
@@ -338,18 +342,64 @@ class Store:
             if len(matches) != 1:
                 warnings.append('找不到唯一員工，請手動配對' if len(matches) != 1 else '')
             elif row['arrivalDate'] and matches[0].get('arrivalDate') and matches[0]['arrivalDate'] != row['arrivalDate']:
-                warnings.append('與員工檔案到職日不同，未覆蓋')
+                warnings.append('與員工檔案到職日不同，保留原值；匯入後可按套用到職日')
             if len(arrivals.get(row['name'], [])) > 1:
                 warnings.append('原Excel各分頁到職日不一致，需核對')
             row['reviewWarnings'] = warnings
             row['repeated'] = self.leave_row_key({k: v for k, v in row.items() if k not in ['employeeId', 'reviewWarnings']}) in old
-        return {'payload': body, 'rows': rows}
+        return {'payload': body, 'rows': rows, 'arrivalPlan': arrival_plan}
+
+    def leave_arrival_plan(self, db, rows):
+        grouped, plan = {}, []
+        for row in rows:
+            grouped.setdefault(row['name'], []).append(row)
+        def rank(row):
+            m = re.match(r'^(\d{3,4})(?:年|$)', row['sourceSheet'])
+            if not m:
+                m = re.fullmatch(r'(\d{3})\d{2}', row['sourceSheet'])
+            if not m:
+                return 0
+            y = int(m[1])
+            return y + 1911 if y < 1911 else y
+        for name, source in grouped.items():
+            matches = list(db.execute("SELECT * FROM employees WHERE json_extract(data,'$.name')=?", (name,)))
+            if len(matches) != 1:
+                continue
+            employee = matches[0]
+            data = json.loads(employee['data'])
+            latest = max(map(rank, source))
+            latest_rows = [r for r in source if rank(r) == latest]
+            dates = {r['arrivalDate'] for r in latest_rows if r['arrivalDate']}
+            if len(dates) != 1:
+                continue
+            arrival = next(iter(dates))
+            chosen = next(r for r in latest_rows if r['arrivalDate'] == arrival)
+            if data.get('departureDate') and arrival > data['departureDate']:
+                continue
+            plan.append({'employeeId': employee['id'], 'name': name, 'arrivalDate': arrival, 'existingDate': data.get('arrivalDate', ''), 'sourceSheet': chosen['sourceSheet'], 'sourceRow': chosen['sourceRow'], 'sourceKey': self.leave_row_key(chosen), 'sourceYear': latest, 'willFill': not data.get('arrivalDate')})
+        return plan
+
+    def write_arrival(self, db, eid, arrival, source, actor):
+        emp = self.employee(db, eid)
+        if emp.get('departureDate') and arrival > emp['departureDate']:
+            raise Problem('到職日不可晚於已登錄的離職日，請核對員工及來源日期')
+        same = emp.get('arrivalDate') == arrival
+        if same and emp.get('arrivalDateSource'):
+            return False
+        data = {k: v for k, v in emp.items() if k not in ['id', 'revision']}
+        data.update(arrivalDate=arrival, arrivalDateSource={**source, 'at': now()})
+        db.execute('UPDATE employees SET data=?,revision=revision+1 WHERE id=?', (compact(data), eid))
+        self.audit(db, actor, '由特休Excel帶入到職日', eid, emp.get('arrivalDate', '') + ' → ' + arrival)
+        return not same
 
     def import_leave(self, body, actor):
         rows = self.leave_payload(body)
-        added = skipped = 0
+        added = skipped = arrival_filled = 0
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
+            for item in self.leave_arrival_plan(db, rows):
+                if item['willFill'] or item['existingDate'] == item['arrivalDate']:
+                    arrival_filled += self.write_arrival(db, item['employeeId'], item['arrivalDate'], {'type': '特休Excel', 'sourceSheet': item['sourceSheet'], 'sourceRow': item['sourceRow'], 'sourceKey': item['sourceKey']}, actor)
             for row in rows:
                 matches = list(db.execute("SELECT id FROM employees WHERE json_extract(data,'$.name')=?", (row['name'],)))
                 eid = matches[0][0] if len(matches) == 1 else None
@@ -360,7 +410,21 @@ class Store:
                 db.execute('INSERT INTO leave_import_rows VALUES(?,?,?,?)', (key, eid, compact(row), now()))
                 added += 1
             self.audit(db, actor, '匯入特休Excel歷史', '', str(added))
-        return {'added': added, 'skipped': skipped}
+        return {'added': added, 'skipped': skipped, 'arrivalFilled': arrival_filled}
+
+    def apply_leave_arrival(self, body, actor):
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM leave_import_rows WHERE id=?', (clean(body.get('id'), 64),)).fetchone()
+            if not row or not row['employee_id']:
+                raise Problem('請先配對這筆特休紀錄的員工')
+            employee = self.employee(db, row['employee_id'])
+            if employee['revision'] != body.get('revision'):
+                raise Problem('員工資料已更新，請重新整理後再套用', 409)
+            source = json.loads(row['data'])
+            arrival = valid_date(source.get('arrivalDate'), False)
+            self.write_arrival(db, row['employee_id'], arrival, {'type': '特休Excel', 'sourceSheet': source['sourceSheet'], 'sourceRow': source['sourceRow'], 'sourceKey': row['id']}, actor)
+        return {'employeeId': row['employee_id'], 'arrivalDate': arrival}
 
     def bind_leave(self, body, actor):
         with self.db() as db:
@@ -704,6 +768,10 @@ class Store:
                 old = db.execute('SELECT data FROM employees WHERE id=?', (eid,)).fetchone()
                 data = json.loads(old[0]) if old else {field: '' for field in EMP_FIELDS}
                 for field in ['name', 'department', 'employmentType', 'arrivalDate', 'departureDate', 'lineBound']:
+                    if field == 'arrivalDate' and data.get('arrivalDateSource'):
+                        if clean(emp.get(field, ''), 200) != data.get(field, ''):
+                            warnings.append(eid + '到職日保留人資已核對值，未以打卡來源覆蓋')
+                        continue
                     data[field] = clean(emp.get(field, ''), 200)
                 if not data['name']:
                     raise Problem('來源員工缺姓名：' + eid)
@@ -931,6 +999,8 @@ class App:
                         raise Problem('Excel上傳未完成')
                     try:
                         parsed = read_excel(raw, clean(params.get('filename'), 250), start, end)
+                    except ValueError as exc:
+                        raise Problem(clean(str(exc), 500)) from None
                     except Exception:
                         raise Problem('Excel無法讀取，請確認為未加密的.xlsx或.xls檔及正確日期範圍') from None
                     preview = self.store.preview_recruitment(parsed)
@@ -959,6 +1029,7 @@ class App:
                     '/api/recruitment/goal': lambda: self.store.add_goal(body, actor),
                     '/api/leave/import': lambda: self.store.import_leave(body, actor),
                     '/api/leave/bind': lambda: self.store.bind_leave(body, actor),
+                    '/api/leave/arrival': lambda: self.store.apply_leave_arrival(body, actor),
                     '/api/import': lambda: self.store.import_payload(body, actor),
                     '/api/sync': lambda: self.store.import_payload(fetch_source(self.source_url, self.source_secret), actor),
                 }

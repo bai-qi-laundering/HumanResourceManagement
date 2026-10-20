@@ -1,6 +1,7 @@
 import io
 import json
 import unittest
+from datetime import datetime, time
 from urllib.parse import urlencode
 
 import openpyxl
@@ -89,3 +90,22 @@ class RecruitmentExcelTests(unittest.TestCase):
         result=read_excel(b.getvalue(),'test.xlsx','2023-01-01','2023-01-31')
         self.assertEqual(len(result['records']),1)
         self.assertEqual(result['records'][0]['callDate'],'2023-01-03')
+
+    def test_headerless_ten_columns_includes_first_row_and_forward_fills_day(self):
+        w = openpyxl.Workbook(); s = w.active
+        s.append([datetime(2026,10,19), '測試甲', '0900-000-001', '作業員', '男', 30, datetime(2026,10,19,13), '已約面試', 104, time(11,18)])
+        s.append([None, '測試乙', '0900000002', '作業員', '女', 25, None, '未接', 104, time(11,19)])
+        b=io.BytesIO();w.save(b)
+        p=read_excel(b.getvalue(),'headerless.xlsx','2026-07-01','2026-10-20')
+        self.assertEqual(len(p['records']),2)
+        self.assertEqual([r['sourceRow'] for r in p['records']],[1,2])
+        self.assertTrue(all(r['callDate']=='2026-10-19' for r in p['records']))
+        self.assertEqual(p['records'][0]['interviewAt'],'2026-10-19T13:00')
+        self.assertEqual(p['records'][0]['callTime'],'11:18')
+        self.assertTrue(p['warnings'])
+        r=self.call('/api/recruitment/import',p)
+        self.assertEqual(r['status'],200,r)
+        self.assertEqual(r['data']['counts']['events'],2)
+        self.assertEqual(self.call('/api/recruitment/import',p)['data']['counts']['skipped'],2)
+        with self.assertRaises(ValueError):
+            read_excel(b.getvalue(),'headerless.xlsx','2026-10-20','2026-10-20')

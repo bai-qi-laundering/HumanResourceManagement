@@ -74,7 +74,7 @@ class LeaveGoalTests(unittest.TestCase):
         self.assertTrue(any('不同' in w for w in r['reviewWarnings']))
         self.assertEqual(preview['rows'][1]['employeeId'], '')
         self.assertEqual(len(self.call('/api/state')['data']['leaveExcel']), 0)
-        self.assertEqual(self.call('/api/leave/import', p)['data'], {'added': 4, 'skipped': 0})
+        self.assertEqual(self.call('/api/leave/import', p)['data'], {'added': 4, 'skipped': 0, 'arrivalFilled': 0})
         state = self.call('/api/state')['data']
         self.assertEqual(state['records'], [])
         self.assertEqual(state['employees'][0]['arrivalDate'], '2024-04-01')
@@ -82,7 +82,7 @@ class LeaveGoalTests(unittest.TestCase):
         self.assertIsNone(row['employeeId'])
         self.assertEqual(self.call('/api/leave/bind', {'id': row['id'], 'employeeId': 'F002'})['status'], 200)
         p['records'][0]['sourceFile'] = 'renamed.xlsx'
-        self.assertEqual(self.call('/api/leave/import', p)['data'], {'added': 0, 'skipped': 4})
+        self.assertEqual(self.call('/api/leave/import', p)['data'], {'added': 0, 'skipped': 4, 'arrivalFilled': 0})
         self.assertTrue(all(r['repeated'] for r in self.app.store.preview_leave(p)['rows']))
         bound = next(r for r in self.call('/api/state')['data']['leaveExcel'] if r['id'] == row['id'])
         self.assertEqual(bound['employeeId'], 'F002')
@@ -97,6 +97,47 @@ class LeaveGoalTests(unittest.TestCase):
         row = read_excel(b.getvalue(), 'test.xlsx')['records'][0]
         self.assertEqual((row['arrivalDate'], row['usedDays'], row['days']), ('2026-07-01', 4, None))
         self.assertTrue(row['warnings'])
+
+    def test_missing_arrival_fills_from_latest_year_and_survives_sync(self):
+        self.emp(arrivalDate='')
+        p = read_excel(self.source(), 'synthetic.xlsx')
+        plan = self.app.store.preview_leave(p)['arrivalPlan']
+        self.assertEqual((plan[0]['sourceSheet'], plan[0]['arrivalDate'], plan[0]['willFill']), ('115', '2024-01-21', True))
+        result = self.call('/api/leave/import', p)
+        self.assertEqual(result['data']['arrivalFilled'], 1)
+        state = self.call('/api/state')['data']
+        emp = state['employees'][0]
+        self.assertEqual(emp['arrivalDate'], '2024-01-21')
+        self.assertEqual(emp['arrivalDateSource']['sourceSheet'], '115')
+        self.assertEqual(state['records'], [])
+        source = {'schema': 1, 'employees': [{'id': 'F001', 'name': '王小明', 'department': '摺疊', 'arrivalDate': ''}]}
+        self.call('/api/import', source)
+        emp = self.call('/api/state')['data']['employees'][0]
+        self.assertEqual(emp['arrivalDate'], '2024-01-21')
+        self.assertEqual(self.call('/api/leave/import', p)['data']['arrivalFilled'], 0)
+        self.call('/api/employee', {**emp, 'arrivalDate': '2024-01-22'})
+        self.call('/api/import', source)
+        self.assertEqual(self.call('/api/state')['data']['employees'][0]['arrivalDate'], '2024-01-22')
+
+    def test_existing_arrival_requires_explicit_apply_with_revision(self):
+        self.emp()
+        p = read_excel(self.source(), 'synthetic.xlsx')
+        self.call('/api/leave/import', p)
+        state = self.call('/api/state')['data']
+        row = next(r for r in state['leaveExcel'] if r['name']=='王小明' and r['sourceSheet']=='115')
+        body = {'id': row['id'], 'revision': state['employees'][0]['revision']}
+        self.assertEqual(self.call('/api/leave/arrival', {**body, 'revision': 0})['status'], 409)
+        self.assertEqual(self.call('/api/leave/arrival', body)['status'], 200)
+        self.assertEqual(self.call('/api/state')['data']['employees'][0]['arrivalDate'], '2024-01-21')
+
+    def test_conflicting_latest_arrivals_are_not_automatically_chosen(self):
+        self.emp(arrivalDate='')
+        p = read_excel(self.source(), 'synthetic.xlsx')
+        latest = next(r for r in p['records'] if r['name']=='王小明' and r['sourceSheet']=='115')
+        p['records'].append({**latest, 'arrivalDate':'2024-02-01', 'sourceRow':99})
+        self.assertEqual(self.app.store.preview_leave(p)['arrivalPlan'], [])
+        self.assertEqual(self.call('/api/leave/import', p)['data']['arrivalFilled'], 0)
+        self.assertEqual(self.call('/api/state')['data']['employees'][0]['arrivalDate'], '')
 
 
 if __name__ == '__main__':

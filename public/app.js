@@ -158,16 +158,16 @@ function leaveExcelTable(id){
   return table(['員工／來源','到職日','原表天數／已休','結算日期','核對／原始內容'],rows.map(r=>{
     const e=employee(r.employeeId),warnings=[...(r.warnings||[])];
     if(!e)warnings.push('尚未配對員工');
-    if(e?.arrivalDate&&r.arrivalDate&&e.arrivalDate!==r.arrivalDate)warnings.push('與員工檔案到職日不同，未覆蓋');
+    if(e?.arrivalDate&&r.arrivalDate&&e.arrivalDate!==r.arrivalDate)warnings.push('與員工檔案到職日不同，可核對後套用');
     const dates=new Set(all.filter(a=>a.name===r.name&&a.arrivalDate).map(a=>a.arrivalDate));if(dates.size>1)warnings.push('各分頁到職日不一致');
-    return `<tr><td>${e?who(e.id):esc(r.name)}<div class="muted">${esc(r.sourceFile)} · ${esc(r.sourceSheet)} · 第 ${esc(r.sourceRow)} 列</div>${button('配對員工','leave-bind',r.id)}</td><td>${esc(r.arrivalDate||r.arrivalRaw||'未填')}</td><td>天數：${esc(r.daysRaw||'未填')}<br>已休：${esc(r.usedRaw||'未填')}<div class="muted">原表歷史值，非目前餘額</div></td><td>${r.settlements.map(s=>esc(s.label)+'：'+esc(s.date||s.raw||'未填')).join('<br>')}</td><td>${warnings.map(w=>badge(w,true)).join(' ')}<details><summary>查看原Excel內容</summary>${r.cells.map(c=>`<p class="record-notes"><b>${esc(c.label)}</b>：${esc(c.value)}</p>`).join('')}</details></td></tr>`;
+    return `<tr><td>${e?who(e.id):esc(r.name)}<div class="muted">${esc(r.sourceFile)} · ${esc(r.sourceSheet)} · 第 ${esc(r.sourceRow)} 列</div>${button('配對員工','leave-bind',r.id)}</td><td>Excel：${esc(r.arrivalDate||r.arrivalRaw||'未填')}<div class="muted">員工檔案：${esc(e?.arrivalDate||'未填')}</div>${e&&r.arrivalDate&&e.arrivalDate!==r.arrivalDate?button('套用到職日','leave-arrival',r.id):''}</td><td>天數：${esc(r.daysRaw||'未填')}<br>已休：${esc(r.usedRaw||'未填')}<div class="muted">原表歷史值，非目前餘額</div></td><td>${r.settlements.map(s=>esc(s.label)+'：'+esc(s.date||s.raw||'未填')).join('<br>')}</td><td>${warnings.map(w=>badge(w,true)).join(' ')}<details><summary>查看原Excel內容</summary>${r.cells.map(c=>`<p class="record-notes"><b>${esc(c.label)}</b>：${esc(c.value)}</p>`).join('')}</details></td></tr>`;
   }));
 }
 function leavePage(){
   const sheets=[...new Set((state.leaveExcel||[]).map(r=>r.sourceSheet))].sort((a,b)=>b.localeCompare(a,undefined,{numeric:true}));
   // Prefer the plain latest year (115), rather than an older date tab (11204).
   if(!leaveSheet&&sheets.length)leaveSheet=sheets.filter(s=>/^\d{3}$/.test(s)).sort((a,b)=>Number(b)-Number(a))[0]||sheets[0];
-  return heading('特休紀錄','特休Excel與人工時數帳本分開呈現',button('新增特休紀錄','leave'))+`<section class="panel"><div class="page-head"><h2>原Excel特休紀錄</h2><button data-leave-import>匯入特休Excel</button><input id="leave-import-file" type="file" accept=".xlsx,.xls" hidden></div><p class="notice">顯示到職日、原表天數、已休、結算日期及備註。空白不當作0；保留各年度及已結清說明，不會自動核給特休或覆蓋員工到職日。核對後可在下方登錄正確期間的時數。</p><div class="toolbar"><label>原Excel分頁<select id="leave-sheet">${sheets.map(s=>`<option ${s===leaveSheet?'selected':''}>${esc(s)}</option>`).join('')}</select></label><input id="leave-search" aria-label="搜尋特休員工" placeholder="搜尋姓名或員工編號" value="${esc(leaveQuery)}"></div><div id="leave-excel-list">${leaveExcelTable()}</div></section><section class="panel"><h2>人工特休時數帳本</h2>${recordTable('leave')}</section>`;
+  return heading('特休紀錄','特休Excel與人工時數帳本分開呈現',button('新增特休紀錄','leave'))+`<section class="panel"><div class="page-head"><h2>原Excel特休紀錄</h2><button data-leave-import>匯入特休Excel</button><input id="leave-import-file" type="file" accept=".xlsx,.xls" hidden></div><p class="notice">顯示到職日、原表天數、已休、結算日期及備註。空白不當作0；保留各年度及已結清說明，確認匯入後，員工檔案缺少的到職日會由最新年度自動帶入；同名、同年度日期衝突及已有不同日期者需核對，可逐筆套用。歷史天數不自動核給為目前餘額。</p><div class="toolbar"><label>原Excel分頁<select id="leave-sheet">${sheets.map(s=>`<option ${s===leaveSheet?'selected':''}>${esc(s)}</option>`).join('')}</select></label><input id="leave-search" aria-label="搜尋特休員工" placeholder="搜尋姓名或員工編號" value="${esc(leaveQuery)}"></div><div id="leave-excel-list">${leaveExcelTable()}</div></section><section class="panel"><h2>人工特休時數帳本</h2>${recordTable('leave')}</section>`;
 }
 async function previewLeaveFile(file){
   if(!file||busy)return;busy=true;document.querySelectorAll('button').forEach(b=>b.disabled=true);
@@ -216,13 +216,17 @@ function openForm(kind,id='',extra=null){
     const depts=[...new Set([...state.employees.map(e=>e.department),...goals.map(g=>g.department)].filter(Boolean))].sort();
     $('dialog-title').textContent=goal?'增加'+id+'徵人需求':'新增部門徵人需求';
     fields=`<p class="wide notice">${goal?'目前需求 '+goal.required+' 人、淨補足 '+goal.netFilled+' 人。增加需求會保留原基準及完成進度。':'請先確認員工名單及離職日已同步。首次建立時以目前在職人數作為基準，之後報到、離職會更新淨補足人數。'}</p>`+(goal?field('部門','department',id,'text',true):select('部門（依員工檔案）','department',depts))+field('本次增加需求人數','additional',1,'number',true)+field('提出原因／備註','notes','','textarea',false,true);
+  }else if(kind==='leave-arrival'){
+    const row=(state.leaveExcel||[]).find(r=>r.id===id),e=employee(row.employeeId);currentForm.revision=e.revision;
+    $('dialog-title').textContent='確認套用員工到職日';
+    fields=`<p class="wide notice">${esc(e.id+' '+e.name)}<br>目前到職日：${esc(e.arrivalDate||'未填')}<br>套用日期：${esc(row.arrivalDate)}<br>來源：${esc(row.sourceSheet)} · 第 ${esc(row.sourceRow)} 列<br>儲存後更新員工檔案，日後同步打卡來源將保留這個已核對日期。</p>`;
   }else if(kind==='leave-bind'){
     const row=(state.leaveExcel||[]).find(r=>r.id===id);$('dialog-title').textContent='特休Excel配對員工';
     fields=`<p class="wide notice">${esc(row.name)} · ${esc(row.sourceSheet)} · 第 ${esc(row.sourceRow)} 列<br>只變更這筆來源紀錄的配對，不覆蓋員工到職日或核給時數。</p><label class="wide">員工<select name="employeeId" required>${employeeOptions(row.employeeId||'')}</select></label>`;
   }else if(kind==='leave-import'){
     $('dialog-title').textContent='確認匯入特休Excel';currentForm.payload=extra.payload;
     const rows=extra.rows,matched=rows.filter(r=>r.employeeId).length;
-    fields=`<div class="wide notice">來源共 ${rows.length} 列，唯一姓名配對 ${matched} 列，待配對 ${rows.length-matched} 列；重複來源 ${rows.filter(r=>r.repeated).length} 列會略過。<br>匯入原始歷史資料，不自動核給或覆蓋到職日。各年度、空白及結清備註均保留。</div><div class="wide">${table(['姓名／分頁','到職日','天數／已休','核對提示'],rows.map(r=>`<tr><td>${esc(r.name)}<br>${esc(r.sourceSheet)} · ${esc(r.sourceRow)}</td><td>${esc(r.arrivalDate||r.arrivalRaw)}</td><td>${esc(r.daysRaw||'未填')} / ${esc(r.usedRaw||'未填')}</td><td>${r.reviewWarnings.map(esc).join('<br>')||'—'}</td></tr>`))}</div>`;
+    fields=`<div class="wide notice">來源共 ${rows.length} 列，唯一姓名配對 ${matched} 列，待配對 ${rows.length-matched} 列；重複來源 ${rows.filter(r=>r.repeated).length} 列會略過。<br>將自動補入 ${(extra.arrivalPlan||[]).filter(p=>p.willFill).length} 位員工缺少的到職日（使用最新年度）。既有不同日期保留，匯入後可逐筆套用。各年度及結清備註均保留，歷史天數不直接核給。</div><div class="wide">${table(['姓名／分頁','到職日','天數／已休','核對提示'],rows.map(r=>`<tr><td>${esc(r.name)}<br>${esc(r.sourceSheet)} · ${esc(r.sourceRow)}</td><td>${esc(r.arrivalDate||r.arrivalRaw)}</td><td>${esc(r.daysRaw||'未填')} / ${esc(r.usedRaw||'未填')}</td><td>${r.reviewWarnings.map(esc).join('<br>')||'—'}${(extra.arrivalPlan||[]).some(p=>p.willFill&&p.employeeId===r.employeeId&&p.sourceSheet===r.sourceSheet&&p.sourceRow===r.sourceRow)?'<br><b>確認匯入後自動帶入到職日</b>':''}</td></tr>`))}</div>`;
   }else if(kind==='recruit-import'){
     $('dialog-title').textContent='確認匯入徵人資料';currentForm.payload=extra.payload;
     const m=extra.summary;fields=`<div class="wide notice">${esc(extra.payload.startDate)}～${esc(extra.payload.endDate)}<br>來源 ${m.rows} 列／依姓名電話合併 ${m.people} 人<br>待新增 ${m.newRows} 列／相同來源略過 ${m.repeatedRows} 列<br>${(extra.warnings||[]).map(esc).join('<br>')}</div><div class="wide">${table(['姓名','電話','原分頁'],extra.payload.records.slice(0,20).map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.phone)}</td><td>${esc(r.sourceSheet)}</td></tr>`))}<p class="muted">預覽前20列；按確認後匯入全部範圍內資料。既有人工編輯資料保留。</p></div>`;
@@ -311,10 +315,11 @@ document.addEventListener('change',async event=>{
 $('edit-form').addEventListener('submit',async event=>{
   event.preventDefault();if(busy)return;const body=Object.fromEntries(new FormData(event.target));
   const form=currentForm;let endpoint;
-  if(form.kind==='leave-import'){try{const r=await action('/api/leave/import',form.payload,'特休Excel歷史紀錄已存入NAS。');notify('特休匯入完成：新增 '+r.added+' 列，相同來源略過 '+r.skipped+' 列。請切換原分頁核對。');$('form-dialog').close();}catch(e){$('form-error').textContent=e.message;}return;}
+  if(form.kind==='leave-import'){try{const r=await action('/api/leave/import',form.payload,'特休Excel歷史紀錄已存入NAS。');notify('特休匯入完成：新增 '+r.added+' 列，相同來源略過 '+r.skipped+' 列；自動帶入 '+(r.arrivalFilled||0)+' 位到職日。');$('form-dialog').close();}catch(e){$('form-error').textContent=e.message;}return;}
   if(form.kind==='recruit-import'){try{const r=await action('/api/recruitment/import',form.payload,'徵人資料已匯入NAS。');notify('匯入完成：新增 '+r.counts.candidates+' 位應徵者、'+r.counts.events+' 筆聯絡紀錄；相同來源略過 '+r.counts.skipped+' 列。');$('form-dialog').close();}catch(e){$('form-error').textContent=e.message;}return;}
   if(form.kind==='upload'){try{await uploadDocument(body,form.file);$('form-dialog').close();}catch(e){$('form-error').textContent=e.message;}return;}
   if(form.kind==='goal'){endpoint='/api/recruitment/goal';body.additional=Number(body.additional);body.revision=form.goalRevisions[body.department]||0;}
+  else if(form.kind==='leave-arrival'){endpoint='/api/leave/arrival';body.id=form.id;body.revision=form.revision;}
   else if(form.kind==='leave-bind'){endpoint='/api/leave/bind';body.id=form.id;}
   else if(form.kind==='candidate'){endpoint='/api/recruitment/candidate';if(form.id){body.id=form.id;body.revision=form.revision;}}
   else if(form.kind.startsWith('recruit-')){const c=candidate(form.id);body.candidateId=c.id;body.revision=form.revision;endpoint=form.kind==='recruit-convert'?'/api/recruitment/convert':'/api/recruitment/event';if(form.kind!=='recruit-convert')body.kind=form.kind==='recruit-phone'?'phone':'interview';}
