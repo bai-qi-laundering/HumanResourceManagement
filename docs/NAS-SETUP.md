@@ -19,9 +19,9 @@
 
 把 `.env.example` 複製成 `.env`，用文字編輯器填入實際值。包含中文／空白路徑時直接填完整文字，勿改原文件名稱。
 
-預先建立 `HR_DATA_PATH` 指定的資料夾，例如 `/volume1/docker/baiqi-hr/data`。File Station 設定共同帳號可讀寫此資料夾，以及可讀原證件資料夾。
+預先建立 `HR_DATA_PATH` 指定的資料夾，例如 `/volume1/docker/baiqi-hr/data`。File Station 設定共同帳號可讀寫此資料夾，以及可讀寫原證件資料夾。
 
-程式容器使用這個數字 UID/GID。三個原文件資料夾使用唯讀掛載；即使 App 被誤操作，也沒有原檔刪除介面。`create_host_path: false` 會在路徑打錯時停止建立，避免掛到空資料夾卻誤以為文件消失。
+程式容器使用這個數字 UID/GID。三個原文件資料夾允許寫入，以便從員工檔案上傳照片或PDF；網站不提供原檔刪除或覆蓋介面。`create_host_path: false` 會在路徑打錯時停止建立，避免掛到空資料夾卻誤以為文件消失。
 
 `HR_GAS_URL`、`HR_GAS_SECRET` 可先空白，部署介面及文件功能不受影響。
 
@@ -52,7 +52,7 @@
 
 程式碼有多層限制，但**不能只靠程式推断穿過路由器的真正來源**：
 
-- Docker 只把 8090 發布在指定 NAS LAN IP，不綁定所有介面。
+- Docker 採 host network 保留真實來源 IP；Gunicorn 僅綁定指定 NAS LAN IP:8090，不綁定所有介面。
 - API 只允許 `OFFICE_CIDRS`；Tailscale 的 100.x、公網、其他公司網段不允許。
 - 不信任 `X-Forwarded-For` 等轉送標頭，拒絕反向代理請求。
 - 不接受 NAS 自己的 LAN IP 轉送，以降低 NAS VPN／代理 masquerade 繞過的風險。

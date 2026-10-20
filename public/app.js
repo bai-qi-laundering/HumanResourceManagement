@@ -4,7 +4,12 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;',
 const money = value => Number(value || 0).toLocaleString('zh-TW', {maximumFractionDigits: 0});
 const today = () => new Intl.DateTimeFormat('sv-SE', {timeZone:'Asia/Taipei'}).format(new Date());
 let state = null, page = 'overview', employeeId = null, tab = 'basic', csrf = '', currentForm = null, busy = false;
-const pages = {overview:'待辦總覽',employees:'員工檔案',insurance:'保險異動',salary:'薪資歷史',leave:'特休紀錄',documents:'文件配對',settings:'連線與匯入'};
+const pages = {overview:'待辦總覽',employees:'員工檔案',insurance:'保險異動',salary:'薪資歷史',leave:'特休紀錄',documents:'文件配對',recruitment:'徵人',settings:'連線與匯入'};
+let candidateId=null;
+let recruitFilters={query:'',department:'',status:'',date:today(),scope:'all'};
+const recruitStatuses=['待聯絡','待面試','待回覆','錄取','待報到','已報到','未錄取','放棄'];
+const localMinute=()=>today()+'T'+new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Taipei',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date());
+const candidate=id=>(state.candidates||[]).find(c=>c.id===id);
 const categoryNames = {identity:'身分證',bank:'存摺',license:'駕照'};
 const employee = id => state.employees.find(e => e.id === id);
 const employeeName = id => employee(id)?.name || id;
@@ -59,7 +64,7 @@ function salaryTable(id){
 }
 function documentCard(e,category){
   const docs=state.documents.filter(d=>d.employeeId===e.id&&d.category===category);
-  return `<article class="document-card"><h3>${categoryNames[category]}</h3>${docs.length?docs.map(d=>`<div><span class="muted">${esc(d.filename)}</span><br>${d.available?`<button class="quiet small" data-preview="${d.id}">開啟${categoryNames[category]}</button>`:badge('原檔不存在，請重新掃描',true)}</div>`).join(''):badge('未配對',true)}</article>`;
+  return `<article class="document-card"><h3>${categoryNames[category]}</h3><button class="small" data-upload="${category}" data-id="${esc(e.id)}">上傳／拍照</button>${docs.length?docs.map(d=>`<div><span class="muted">${esc(d.filename)}</span><br>${d.available?`<button class="quiet small" data-preview="${d.id}">開啟${categoryNames[category]}</button>`:badge('原檔不存在，請重新掃描',true)}</div>`).join(''):badge('未配對',true)}</article>`;
 }
 function employeeView(){
   const e=employee(employeeId);if(!e){employeeId=null;return employees();}
@@ -68,7 +73,7 @@ function employeeView(){
   if(tab==='basic'){
     const fields={'員工編號':e.id,'部門':e.department,'職務':e.job,'聘僱型態':e.employmentType,'到職日':e.arrivalDate,'離職日':e.departureDate,'電話':e.phone,'緊急聯絡人':e.emergencyContact,'紙本原件位置':e.paperLocation,'LINE綁定':e.lineBound,'備註':e.notes};
     body=`<section class="panel"><div class="page-head"><h2>基本資料</h2>${button('編輯資料','employee',e.id)}</div><div class="fields">${Object.entries(fields).map(([k,v])=>`<div><div class="field-label">${esc(k)}</div><div class="field-value">${esc(v||'—')}</div></div>`).join('')}</div></section>`;
-  }else if(tab==='documents')body=`<section class="panel"><h2>NAS原始文件</h2><div class="document-grid">${Object.keys(categoryNames).map(c=>documentCard(e,c)).join('')}</div><div class="notice">檔案不搬動、不設公開連結。文件配對後直接開啟預覽；駕照效期等資料可在「人事異動」登記。</div><button class="quiet" data-page="documents">文件掃描及配對</button></section>`;
+  }else if(tab==='documents')body=`<section class="panel"><h2>NAS原始文件</h2><div class="document-grid">${Object.keys(categoryNames).map(c=>documentCard(e,c)).join('')}</div><div class="notice">上傳後存入對應NAS資料夾並自動綁定此員工，每次保留新檔。既有文件配對後直接開啟預覽；駕照效期等資料可在「人事異動」登記。</div><button class="quiet" data-page="documents">文件掃描及配對</button></section>`;
   else if(tab==='salary')body=`<section class="panel"><div class="page-head"><h2>薪資版本</h2>${button('登錄薪資','salary',e.id)}</div>${salaryTable(e.id)}</section>`;
   else if(tab==='attendance'){
     const rows=state.attendance.filter(r=>r.employeeId===e.id).sort((a,b)=>(b.date+b.time).localeCompare(a.date+a.time));
@@ -81,22 +86,84 @@ function employeeView(){
   return `<button class="quiet back" data-page="employees">← 員工名單</button><div class="person"><div class="avatar">${esc(e.name.slice(0,1))}</div><div><h1>${esc(e.name)} <span class="muted">${esc(e.id)}</span></h1><div class="muted">${esc(e.department)}・${esc(e.employmentType)}・${active(e)?'在職':'離職／尚未到職'}</div></div></div><div class="tabs" role="tablist" aria-label="員工資料">${Object.entries(tabs).map(([k,v])=>`<button role="tab" aria-selected="${tab===k}" class="${tab===k?'active':''}" data-tab="${k}">${v}</button>`).join('')}</div>${body}`;
 }
 function documents(){
-  return heading('文件配對','依檔名建議人選，確認後才綁定；原NAS資料夾不變','<button data-scan>掃描NAS資料夾</button>')+`<section class="panel">${table(['種類／檔名','狀態','綁定／建議人員','操作'],state.documents.map(d=>`<tr><td>${categoryNames[d.category]}<div class="muted">${esc(d.filename)}</div></td><td>${badge(!d.available?'原檔不存在':d.employeeId?'已確認':'待配對',!d.available||!d.employeeId)}</td><td>${d.employeeId?who(d.employeeId):`<div class="muted">${d.suggestions.length===1?'建議：'+esc(employeeName(d.suggestions[0])):d.suggestions.length?'同名人員，請人工選擇':'未找到相同姓名，請人工選擇'}</div>`}</td><td>${d.available?`<div class="file-row"><button class="quiet small" data-bind="${d.id}">${d.employeeId?'重新配對':'確認配對'}</button>${d.employeeId?`<button class="small" data-preview="${d.id}">預覽</button>`:''}</div>`:''}</td></tr>`))}</section>`;
+  return heading('文件配對','依檔名建議人選，確認後才綁定；原NAS資料夾不變','<button data-form="upload">上傳員工文件</button><button data-scan>掃描NAS資料夾</button>')+`<section class="panel">${table(['種類／檔名','狀態','綁定／建議人員','操作'],state.documents.map(d=>`<tr><td>${categoryNames[d.category]}<div class="muted">${esc(d.filename)}</div></td><td>${badge(!d.available?'原檔不存在':d.employeeId?'已確認':'待配對',!d.available||!d.employeeId)}</td><td>${d.employeeId?who(d.employeeId):`<div class="muted">${d.suggestions.length===1?'建議：'+esc(employeeName(d.suggestions[0])):d.suggestions.length?'同名人員，請人工選擇':'未找到相同姓名，請人工選擇'}</div>`}</td><td>${d.available?`<div class="file-row"><button class="quiet small" data-bind="${d.id}">${d.employeeId?'重新配對':'確認配對'}</button>${d.employeeId?`<button class="small" data-preview="${d.id}">預覽</button>`:''}</div>`:''}</td></tr>`))}</section>`;
 }
 function settings(){
-  return heading('連線與匯入','資料不會上傳GitHub；設定在NAS環境檔保存')+`<div class="split"><section class="panel"><h2>NAS資料夾</h2>${Object.entries(categoryNames).map(([k,v])=>`<div class="task"><div><strong>${v}</strong></div>${badge(state.settings.documentRoots[k]?'可讀取':'尚未連接',!state.settings.documentRoots[k])}</div>`).join('')}<div class="notice">在NAS的.env填入原資料夾路徑，再重建容器。文件為唯讀掛載，人資系統不會刪除、搬動原檔。</div><button data-scan>掃描文件</button></section><section class="panel"><h2>現有打卡系統</h2><p>${badge(state.settings.gasConfigured?'串接已設定':'尚未設定',!state.settings.gasConfigured)}</p><p class="muted">${esc(state.lastImport?.time||'尚未同步')}<br>員工資料、原始打卡及試算表內已計算的薪資版本。</p><div class="actions"><button data-sync ${state.settings.gasConfigured?'':'disabled'}>同步打卡資料</button><button class="quiet" id="import-button">匯入JSON檔</button><input id="import-file" type="file" accept="application/json,.json" hidden></div><div class="notice">串接只讀，不改原Webhook，也不重新計算薪資。特休與保險資料尚未回寫既有薪資程式。</div>${state.lastImport?.warnings?.length?`<p class="muted">上次匯入提醒：${esc(state.lastImport.warnings.join('；'))}</p>`:''}</section></div><section class="panel"><h2>最近操作紀錄</h2><div class="notice">目前為共同使用模式，只記錄來源IP、時間及動作，不能識別個別人員。</div>${table(['時間','來源IP','操作','對象'],state.audit.map(r=>`<tr><td>${esc(r.created)}</td><td>${esc(r.actor)}</td><td>${esc(r.action)}</td><td>${esc(r.target)}</td></tr>`))}</section>`;
+  return heading('連線與匯入','資料不會上傳GitHub；設定在NAS環境檔保存')+`<div class="split"><section class="panel"><h2>NAS資料夾</h2>${Object.entries(categoryNames).map(([k,v])=>`<div class="task"><div><strong>${v}</strong></div>${badge(state.settings.documentAccess?.[k]?.writable?'可讀寫':state.settings.documentRoots[k]?'可讀取／未允許上傳':'尚未連接',!state.settings.documentRoots[k])}</div>`).join('')}<div class="notice">在NAS的.env填入原資料夾路徑，再重建容器。文件上傳需要NAS資料夾與容器掛載均允許寫入；既有文件不刪除、不覆蓋。每份文件上限12MB。</div><button data-scan>掃描文件</button></section><section class="panel"><h2>現有打卡系統</h2><p>${badge(state.settings.gasConfigured?'串接已設定':'尚未設定',!state.settings.gasConfigured)}</p><p class="muted">${esc(state.lastImport?.time||'尚未同步')}<br>員工資料、原始打卡及試算表內已計算的薪資版本。</p><div class="actions"><button data-sync ${state.settings.gasConfigured?'':'disabled'}>同步打卡資料</button><button class="quiet" id="import-button">匯入JSON檔</button><input id="import-file" type="file" accept="application/json,.json" hidden></div><div class="notice">串接只讀，不改原Webhook，也不重新計算薪資。特休與保險資料尚未回寫既有薪資程式。</div>${state.lastImport?.warnings?.length?`<p class="muted">上次匯入提醒：${esc(state.lastImport.warnings.join('；'))}</p>`:''}</section></div><section class="panel"><h2>最近操作紀錄</h2><div class="notice">目前為共同使用模式，只記錄來源IP、時間及動作，不能識別個別人員。</div>${table(['時間','來源IP','操作','對象'],state.audit.map(r=>`<tr><td>${esc(r.created)}</td><td>${esc(r.actor)}</td><td>${esc(r.action)}</td><td>${esc(r.target)}</td></tr>`))}</section>`;
 }
 function render(){
   $('navigation').innerHTML=Object.entries(pages).map(([k,v])=>`<button class="${page===k?'active':''}" data-page="${k}" aria-current="${page===k?'page':'false'}">${v}</button>`).join('');
-  const renderers={overview,employees,documents,settings,insurance:()=>heading('保險異動','實際加退保日期及投保級距分開記錄',button('新增保險紀錄','insurance'))+`<section class="panel">${recordTable('insurance')}</section>`,salary:()=>heading('薪資歷史','保留每次匯入版本；核定及付款只變更狀態，不改金額',button('登錄薪資','salary'))+`<section class="panel">${salaryTable()}</section>`,leave:()=>heading('特休紀錄','以時數及各期帳本記錄，不與月休8天混用',button('新增特休紀錄','leave'))+`<section class="panel">${recordTable('leave')}</section>`};
+  const renderers={overview,employees,documents,settings,recruitment,insurance:()=>heading('保險異動','實際加退保日期及投保級距分開記錄',button('新增保險紀錄','insurance'))+`<section class="panel">${recordTable('insurance')}</section>`,salary:()=>heading('薪資歷史','保留每次匯入版本；核定及付款只變更狀態，不改金額',button('登錄薪資','salary'))+`<section class="panel">${salaryTable()}</section>`,leave:()=>heading('特休紀錄','以時數及各期帳本記錄，不與月休8天混用',button('新增特休紀錄','leave'))+`<section class="panel">${recordTable('leave')}</section>`};
   $('content').innerHTML=page==='employees'&&employeeId?employeeView():renderers[page]();
+}
+function recruitOpen(c){return !['已報到','未錄取','放棄'].includes(c.status);}
+function recruitMatch(c){
+  const f=recruitFilters,query=(c.name+' '+c.phone+' '+c.job).toLowerCase();
+  return query.includes(f.query.toLowerCase())&&(!f.department||c.department===f.department)&&(!f.status||c.status===f.status)&&
+    (f.scope==='all'||f.scope==='due'&&recruitOpen(c)&&c.followupDate&&c.followupDate<=today()||f.scope==='interview'&&recruitOpen(c)&&c.interviewAt?.slice(0,10)===today()||f.scope==='overdue'&&recruitOpen(c)&&c.followupDate&&c.followupDate<today()||f.scope==='onboard'&&c.status==='待報到');
+}
+function candidateList(){
+  const people=(state.candidates||[]).filter(recruitMatch);
+  return table(['應徵者／電話','部門／職缺','進度','面試／下次追蹤','處理'],people.map(c=>`<tr><td><button class="employee-link" data-candidate="${esc(c.id)}">${esc(c.name)}</button><div class="muted">${esc(c.phone)}</div></td><td>${esc(c.department||'—')}<div class="muted">${esc(c.job)}</div></td><td>${badge(c.status,recruitOpen(c)&&!!c.followupDate&&c.followupDate<today())}</td><td>${esc(c.interviewAt?.replace('T',' ')||'未排面試')}<div class="muted">追蹤：${esc(c.followupDate||'未設定')}</div></td><td><div class="actions">${button('電話紀錄','recruit-phone',c.id)}${button('面試紀錄','recruit-interview',c.id)}</div></td></tr>`));
+}
+function recruitEvents(id=null){
+  const rows=(state.recruitmentEvents||[]).filter(r=>id?r.candidateId===id:r.at.slice(0,10)===recruitFilters.date&&candidate(r.candidateId)&&recruitMatch(candidate(r.candidateId))).sort((a,b)=>b.at.localeCompare(a.at)||b.created.localeCompare(a.created));
+  return table(id?['日期時間','種類／結果','聯絡人／主管','紀錄／後續']:['日期時間','應徵者','種類／結果','聯絡人／主管','紀錄／後續'],rows.map(r=>`<tr><td>${esc(r.at.replace('T',' '))}</td>${id?'':`<td><button class="employee-link" data-candidate="${esc(r.candidateId)}">${esc(candidate(r.candidateId)?.name||'—')}</button></td>`}<td>${r.kind==='phone'?'電話':'面試'}<br>${esc(r.outcome)}</td><td>${esc(r.contactPerson)}</td><td class="record-notes">${esc(r.notes||'—')}${r.nextFollowup?`<div class="muted">下次追蹤：${esc(r.nextFollowup)}</div>`:''}${r.nextInterviewAt?`<div class="muted">預約面試：${esc(r.nextInterviewAt.replace('T',' '))}</div>`:''}</td></tr>`));
+}
+function recruitment(){
+  if(candidateId){
+    const c=candidate(candidateId);if(!c){candidateId=null;return recruitment();}
+    const fields={'電話':c.phone,'部門／職缺':[c.department,c.job].filter(Boolean).join('／'),'招募來源':c.source,'負責聯絡人':c.contactPerson,'可到職日':c.availableDate,'預約面試':c.interviewAt?.replace('T',' '),'下次追蹤日':c.followupDate,'進度':c.status,'備註':c.notes};
+    return '<button class="quiet back" data-recruit-back>← 應徵者名單</button>'+heading(c.name,'招募歷程持續保留，不會被新的聯絡紀錄覆蓋',button('編輯應徵者','candidate',c.id)+button('新增電話紀錄','recruit-phone',c.id)+button('新增面試紀錄','recruit-interview',c.id)+(c.employeeId?`<button data-employee="${esc(c.employeeId)}">查看員工檔案</button>`:button('報到並轉為員工','recruit-convert',c.id)))+`<section class="panel"><div class="fields">${Object.entries(fields).map(([k,v])=>`<div><div class="field-label">${esc(k)}</div><div class="field-value">${esc(v||'—')}</div></div>`).join('')}</div></section><section class="panel"><h2>電話與面試完整歷程</h2>${recruitEvents(c.id)}</section>`;
+  }
+  const people=state.candidates||[],open=people.filter(recruitOpen),departments=[...new Set(people.map(c=>c.department).filter(Boolean))].sort();
+  const counts=[['due','今日待聯絡',open.filter(c=>c.followupDate&&c.followupDate<=today()).length],['interview','今日面試',open.filter(c=>c.interviewAt?.slice(0,10)===today()).length],['overdue','逾期追蹤',open.filter(c=>c.followupDate&&c.followupDate<today()).length],['onboard','待報到',people.filter(c=>c.status==='待報到').length]];
+  return heading('徵人',today()+'｜電話聯絡、面試及報到進度',button('新增應徵者','candidate'))+`<div class="stats">${counts.map(([k,t,n])=>`<button class="stat recruit-stat ${recruitFilters.scope===k?'selected':''}" data-recruit-scope="${k}"><span>${t}</span><strong>${n}</strong></button>`).join('')}</div><div class="toolbar"><input id="recruit-search" aria-label="搜尋應徵者" placeholder="搜尋姓名、電話或職缺" value="${esc(recruitFilters.query)}"><select id="recruit-department" aria-label="招募部門"><option value="">全部部門</option>${departments.map(d=>`<option ${d===recruitFilters.department?'selected':''}>${esc(d)}</option>`).join('')}</select><select id="recruit-status" aria-label="招募進度"><option value="">全部進度</option>${recruitStatuses.map(d=>`<option ${d===recruitFilters.status?'selected':''}>${esc(d)}</option>`).join('')}</select><button class="quiet" data-recruit-scope="all">全部人員</button></div><section class="panel"><h2>應徵者名單</h2><div id="candidate-list">${candidateList()}</div></section><section class="panel"><div class="page-head"><h2>每日電話與面試紀錄</h2><label>紀錄日期<input id="recruit-date" type="date" value="${esc(recruitFilters.date)}"></label></div><div id="recruit-events">${recruitEvents()}</div></section>`;
+}
+function refreshRecruitLists(){if($('candidate-list'))$('candidate-list').innerHTML=candidateList();if($('recruit-events'))$('recruit-events').innerHTML=recruitEvents();}
+async function prepareDocument(file){
+  if(!file)throw Error('請先選擇檔案或拍照');
+  const limit=state.settings.uploadLimit||12*1024*1024;
+  if(/\.(pdf|jpe?g|png|webp)$/i.test(file.name)&&file.size<=limit)return file;
+  if(/\.pdf$/i.test(file.name)&&file.size>limit)throw Error('單一文件不可超過12MB');
+  if(!file.type.startsWith('image/')&&!/\.(heic|heif|jpe?g|png|webp)$/i.test(file.name))throw Error('請選PDF、JPG、PNG或WEBP');
+  let image;
+  try{image=await createImageBitmap(file);}catch{throw Error('手機照片無法轉換，請改選JPG照片或在相機設定使用相容格式');}
+  try{
+    const scale=Math.min(1,2400/Math.max(image.width,image.height)),canvas=document.createElement('canvas');canvas.width=Math.round(image.width*scale);canvas.height=Math.round(image.height*scale);const context=canvas.getContext('2d');context.fillStyle='#fff';context.fillRect(0,0,canvas.width,canvas.height);context.drawImage(image,0,0,canvas.width,canvas.height);
+    const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',0.9));
+    if(!blob||blob.size>limit)throw Error('照片轉換後仍超過12MB，請縮小後上傳');
+    return new File([blob],'photo.jpg',{type:'image/jpeg'});
+  }finally{image.close();}
+}
+async function uploadDocument(body,file){
+  if(busy)return;busy=true;document.querySelectorAll('button').forEach(b=>b.disabled=true);
+  try{
+    const ready=await prepareDocument(file),params=new URLSearchParams({employeeId:body.employeeId,category:body.category,filename:ready.name});
+    const res=await fetch('/api/documents/upload?'+params,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/octet-stream','X-HR-CSRF':csrf},body:ready});
+    const result=await res.json();if(!res.ok)throw Error(result.error||'上傳失敗');
+    await load();notify('已存入NAS並綁定員工：'+result.filename);return result;
+  }catch(e){notify(e.message,true);throw e;}
+  finally{busy=false;document.querySelectorAll('button').forEach(b=>b.disabled=false);const sync=document.querySelector('[data-sync]');if(sync)sync.disabled=!state?.settings.gasConfigured;}
 }
 function employeeOptions(value=''){return `<option value="">選擇員工</option>`+state.employees.map(e=>`<option value="${esc(e.id)}" ${e.id===value?'selected':''}>${esc(e.id+' '+e.name+'・'+e.department)}</option>`).join('');}
 function field(label,name,value='',type='text',required=false,wide=false){return `<label class="${wide?'wide':''}">${esc(label)}${type==='textarea'?`<textarea name="${name}" ${required?'required':''}>${esc(value)}</textarea>`:`<input name="${name}" type="${type}" value="${esc(value)}" ${required?'required':''}>`}</label>`;}
 function select(label,name,options,value=''){return `<label>${esc(label)}<select name="${name}" required>${options.map(v=>`<option value="${esc(v)}" ${v===value?'selected':''}>${esc(v)}</option>`).join('')}</select></label>`;}
 function openForm(kind,id='',extra=null){
   currentForm={kind,id,extra};$('form-error').textContent='';let fields='';
-  if(kind==='employee'){
+  if(kind==='upload'){
+    $('dialog-title').textContent='上傳員工文件';
+    fields=`<label>員工<select name="employeeId" required>${employeeOptions(id)}</select></label><label>文件類型<select name="category" required>${Object.entries(categoryNames).map(([k,v])=>`<option value="${k}" ${extra===k?'selected':''}>${v}</option>`).join('')}</select></label><label class="wide">選擇文件<input id="document-file" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp,.heic,.heif,image/*"></label><label class="wide">或用手機／平板拍照<input id="document-camera" type="file" accept="image/*" capture="environment"></label><p id="upload-selection" class="wide muted">單份上限12MB；每次上傳保留新檔，會自動綁定所選員工。</p>`;
+  }else if(kind==='candidate'){
+    const c=id?candidate(id):{};$('dialog-title').textContent=id?'編輯應徵者':'新增應徵者';
+    fields=field('姓名','name',c.name||'','text',true)+field('電話','phone',c.phone||'','tel',true)+field('應徵部門','department',c.department)+field('應徵職缺','job',c.job)+field('招募來源','source',c.source)+field('負責聯絡人','contactPerson',c.contactPerson)+field('可到職日','availableDate',c.availableDate,'date')+field('下次追蹤日','followupDate',c.followupDate,'date')+field('預約面試時間','interviewAt',c.interviewAt,'datetime-local')+select('招募進度','status',recruitStatuses,c.status||'待聯絡')+field('備註','notes',c.notes,'textarea',false,true);
+  }else if(kind==='recruit-phone'||kind==='recruit-interview'){
+    const c=candidate(id),phone=kind==='recruit-phone';$('dialog-title').textContent=c.name+'｜新增'+(phone?'電話':'面試')+'紀錄';
+    fields=field('實際日期時間','at',localMinute(),'datetime-local',true)+field(phone?'聯絡人':'面試主管','contactPerson',c.contactPerson,'text',true)+select('結果','outcome',phone?['已接通','未接','忙線','停話／錯號','婉拒','約定面試','待回覆']:['已面試','未到場','改期','錄取','未錄取','待回覆'])+select('更新招募進度','status',recruitStatuses,c.status)+field('下次追蹤日（空白表示無待追蹤）','nextFollowup',c.followupDate,'date')+field('下次預約面試時間','nextInterviewAt',phone?c.interviewAt:'','datetime-local')+field(phone?'談話摘要':'面試內容／評語','notes','','textarea',false,true);
+  }else if(kind==='recruit-convert'){
+    const c=candidate(id);$('dialog-title').textContent=c.name+'｜報到並轉為員工';
+    fields='<p class="wide notice">建立NAS人資員工檔案並保留招募歷程；不會新增LINE綁定或回寫打卡試算表。打卡系統仍需用相同員工編號建檔。</p>'+field('員工編號','employeeId','','text',true)+field('實際到職日','arrivalDate',c.availableDate||today(),'date',true)+select('聘僱型態','employmentType',['正職','時薪','兼職']);
+  }else if(kind==='employee'){
     const e=id?employee(id):{};$('dialog-title').textContent=id?'編輯員工檔案':'新增員工';
     fields=field('員工編號','id',e.id||'','text',true)+field('姓名','name',e.name||'','text',true)+field('部門','department',e.department)+field('職務','job',e.job)+select('聘僱型態','employmentType',['正職','時薪','兼職'],e.employmentType)+field('到職日','arrivalDate',e.arrivalDate,'date')+field('離職日','departureDate',e.departureDate,'date')+field('電話','phone',e.phone)+field('緊急聯絡人／電話','emergencyContact',e.emergencyContact)+field('紙本原件位置','paperLocation',e.paperLocation)+field('備註','notes',e.notes,'textarea',false,true);
   }else if(kind==='bind'){
@@ -113,6 +180,7 @@ function openForm(kind,id='',extra=null){
     }
     fields+=field('說明／依據','notes','','textarea',false,true);
   }
+  if(['candidate','recruit-phone','recruit-interview','recruit-convert'].includes(kind)&&id)currentForm.revision=candidate(id).revision;
   $('form-fields').innerHTML=`<div class="form-grid">${fields}</div>`;
   $('form-fields').querySelectorAll('input[type="number"]').forEach(e=>e.step='any');
   if(kind==='employee'&&id)$('form-fields').querySelector('[name=id]').readOnly=true;
@@ -122,7 +190,11 @@ document.addEventListener('click',async event=>{
   const b=event.target.closest('button');if(!b||busy)return;
   if(!state&&b.id!=='refresh'){notify('請先重新整理，恢復公司網路連線。',true);return;}
   try{
-    if(b.dataset.page){page=b.dataset.page;employeeId=null;tab='basic';render();}
+    if(b.dataset.page){page=b.dataset.page;employeeId=null;candidateId=null;tab='basic';render();}
+    else if(b.dataset.candidate){page='recruitment';candidateId=b.dataset.candidate;render();}
+    else if(b.hasAttribute('data-recruit-back')){candidateId=null;render();}
+    else if(b.dataset.recruitScope){recruitFilters.scope=b.dataset.recruitScope;render();}
+    else if(b.dataset.upload)openForm('upload',b.dataset.id,b.dataset.upload);
     else if(b.dataset.employee){page='employees';employeeId=b.dataset.employee;tab='basic';render();}
     else if(b.dataset.tab){tab=b.dataset.tab;render();}
     else if(b.dataset.form)openForm(b.dataset.form,b.dataset.id);
@@ -141,8 +213,11 @@ document.addEventListener('click',async event=>{
     else if(b.id==='import-button')$('import-file').click();
   }catch{/* Action already displays errors. */}
 });
-document.addEventListener('input',event=>{if(event.target.id==='employee-search')$('employee-table').innerHTML=employeeTable(event.target.value,$('employee-filter').value);});
+document.addEventListener('input',event=>{if(event.target.id==='recruit-search'){recruitFilters.query=event.target.value;refreshRecruitLists();}if(event.target.id==='employee-search')$('employee-table').innerHTML=employeeTable(event.target.value,$('employee-filter').value);});
 document.addEventListener('change',async event=>{
+  const recruitKeys={'recruit-department':'department','recruit-status':'status','recruit-date':'date'};if(recruitKeys[event.target.id]){recruitFilters[recruitKeys[event.target.id]]=event.target.value;refreshRecruitLists();}
+  if(['document-file','document-camera'].includes(event.target.id)){currentForm.file=event.target.files[0];$('upload-selection').textContent=currentForm.file?'已選擇：'+currentForm.file.name:'尚未選擇檔案';}
+
   if(event.target.id==='employee-filter')$('employee-table').innerHTML=employeeTable($('employee-search').value,event.target.value);
   if(event.target.id==='import-file'){
     const file=event.target.files[0];if(!file)return;
@@ -153,7 +228,10 @@ document.addEventListener('change',async event=>{
 $('edit-form').addEventListener('submit',async event=>{
   event.preventDefault();if(busy)return;const body=Object.fromEntries(new FormData(event.target));
   const form=currentForm;let endpoint;
-  if(form.kind==='employee'){endpoint='/api/employee';const old=form.id?employee(form.id):null;if(old){body.revision=old.revision;body.lineBound=old.lineBound;}}
+  if(form.kind==='upload'){try{await uploadDocument(body,form.file);$('form-dialog').close();}catch(e){$('form-error').textContent=e.message;}return;}
+  if(form.kind==='candidate'){endpoint='/api/recruitment/candidate';if(form.id){body.id=form.id;body.revision=form.revision;}}
+  else if(form.kind.startsWith('recruit-')){const c=candidate(form.id);body.candidateId=c.id;body.revision=form.revision;endpoint=form.kind==='recruit-convert'?'/api/recruitment/convert':'/api/recruitment/event';if(form.kind!=='recruit-convert')body.kind=form.kind==='recruit-phone'?'phone':'interview';}
+  else if(form.kind==='employee'){endpoint='/api/employee';const old=form.id?employee(form.id):null;if(old){body.revision=old.revision;body.lineBound=old.lineBound;}}
   else if(form.kind==='bind'){endpoint='/api/documents/bind';body.id=form.extra;}
   else if(form.kind==='salary')endpoint='/api/salary';
   else{endpoint='/api/record';body.kind=form.kind;if(form.kind==='insurance')body.verified=body.verified==='已確認';}

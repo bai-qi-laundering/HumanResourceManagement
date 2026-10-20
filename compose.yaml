@@ -4,9 +4,25 @@ services:
     container_name: baiqi-hr
     restart: unless-stopped
     user: "${HR_UID:?Fill NAS uid}:${HR_GID:?Fill NAS gid}"
-    ports:
-      - "${NAS_LAN_IP:?Fill NAS LAN IP}:8090:8090"
+    network_mode: host
+    command:
+      - gunicorn
+      - server:application
+      - --bind
+      - "${NAS_LAN_IP:?Fill NAS LAN IP}:8090"
+      - --workers
+      - "1"
+      - --threads
+      - "4"
+      - --timeout
+      - "120"
+      - --forwarded-allow-ips=
+      - --error-logfile
+      - "-"
+      - --access-logfile
+      - "-"
     environment:
+      FORWARDED_ALLOW_IPS: ""
       HR_DATA_DIR: /data
       HR_ALLOWED_CIDRS: "${OFFICE_CIDRS:?Fill office subnet}"
       HR_ALLOWED_HOSTS: "${NAS_LAN_IP}"
@@ -25,19 +41,19 @@ services:
       - type: bind
         source: ${NAS_IDENTITY_PATH:?Fill identity folder}
         target: /documents/identity
-        read_only: true
+        read_only: false
         bind:
           create_host_path: false
       - type: bind
         source: ${NAS_BANK_PATH:?Fill bank folder}
         target: /documents/bank
-        read_only: true
+        read_only: false
         bind:
           create_host_path: false
       - type: bind
         source: ${NAS_LICENSE_PATH:?Fill license folder}
         target: /documents/license
-        read_only: true
+        read_only: false
         bind:
           create_host_path: false
     read_only: true

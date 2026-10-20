@@ -1,4 +1,4 @@
-"""百麒人資：內網 WSGI API、SQLite、NAS 唯讀文件。"""
+"""百麒人資：內網 WSGI API、SQLite、NAS 文件及招募紀錄。"""
 import base64
 import hashlib
 import hmac
@@ -22,6 +22,29 @@ TZ = ZoneInfo('Asia/Taipei')
 DOC_TYPES = {'identity': '身分證', 'bank': '存摺', 'license': '駕照'}
 MIMES = {'.pdf': 'application/pdf', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp'}
 EMP_FIELDS = ['name', 'department', 'job', 'employmentType', 'arrivalDate', 'departureDate', 'phone', 'emergencyContact', 'paperLocation', 'notes', 'lineBound']
+UPLOAD_LIMIT = 12 * 1024 * 1024
+RECRUIT_STATUSES = ['待聯絡', '待面試', '待回覆', '錄取', '待報到', '已報到', '未錄取', '放棄']
+
+
+def local_datetime(value, optional=True):
+    value = clean(value, 16)
+    if not value and optional:
+        return ''
+    try:
+        return datetime.strptime(value, '%Y-%m-%dT%H:%M').isoformat(timespec='minutes')
+    except ValueError:
+        raise Problem('請填有效的日期與時間')
+
+
+def document_access(root):
+    if not root:
+        return {'readable': False, 'writable': False}
+    try:
+        with os.scandir(root) as entries:
+            next(entries, None)
+        return {'readable': True, 'writable': os.access(root, os.W_OK | os.X_OK)}
+    except OSError:
+        return {'readable': False, 'writable': False}
 
 
 class Problem(Exception):
@@ -84,6 +107,8 @@ class Store:
                 CREATE TABLE IF NOT EXISTS attendance(id TEXT PRIMARY KEY, employee_id TEXT NOT NULL REFERENCES employees(id), data TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT, created TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, detail TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS candidates(id TEXT PRIMARY KEY, data TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1, created TEXT NOT NULL, updated TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS recruitment_events(id TEXT PRIMARY KEY, candidate_id TEXT NOT NULL REFERENCES candidates(id), kind TEXT NOT NULL, data TEXT NOT NULL, created TEXT NOT NULL);
             ''')
         os.chmod(self.path, 0o600)
 
@@ -225,19 +250,174 @@ class Store:
             docs = [{'id': r['id'], 'category': r['category'], 'filename': r['filename'], 'available': bool(r['available']), 'employeeId': r['employee_id'], 'suggestions': json.loads(r['suggestions']), 'size': r['size']} for r in db.execute('SELECT * FROM documents ORDER BY category,filename')]
             audit = [dict(row) for row in db.execute('SELECT * FROM audit ORDER BY id DESC LIMIT 100')]
             attendance = [json.loads(r[0]) for r in db.execute('SELECT data FROM attendance ORDER BY id LIMIT 20000')]
+            candidates = [self.candidate(db, r[0]) for r in db.execute('SELECT id FROM candidates ORDER BY updated DESC,id').fetchall()]
+            recruitment_events = [{'id': r['id'], 'candidateId': r['candidate_id'], 'kind': r['kind'], 'created': r['created'], **json.loads(r['data'])} for r in db.execute('SELECT * FROM recruitment_events ORDER BY created DESC,id DESC')]
             last = db.execute("SELECT value FROM settings WHERE key='lastImport'").fetchone()
-        return {'employees': employees, 'records': records, 'salaries': salaries, 'documents': docs, 'attendance': attendance, 'audit': audit, 'lastImport': json.loads(last[0]) if last else None, 'settings': settings}
+        return {'employees': employees, 'records': records, 'salaries': salaries, 'documents': docs, 'attendance': attendance, 'candidates': candidates, 'recruitmentEvents': recruitment_events, 'audit': audit, 'lastImport': json.loads(last[0]) if last else None, 'settings': settings}
+
+    def upload_document(self, body, stream, length, roots, actor):
+        employee_id, category = ident(body.get('employeeId')), body.get('category')
+        if category not in DOC_TYPES:
+            raise Problem('請選文件類型')
+        extension = Path(clean(body.get('filename'), 250)).suffix.lower()
+        if extension not in MIMES:
+            raise Problem('僅接受 PDF、JPG、PNG、WEBP；手機照片請轉成 JPG')
+        if not 0 < length <= UPLOAD_LIMIT:
+            raise Problem('單一文件不可超過12MB，且不可為空檔', 413)
+        root = roots.get(category)
+        if not root:
+            raise Problem('NAS文件資料夾尚未設定', 503)
+        # The browser never chooses a destination path. Each write is exclusive and
+        # scoped to an already-open NAS root directory, with cleanup on DB failure.
+        directory, filename, created = None, '', False
+        try:
+            directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            with self.db() as db:
+                db.execute('BEGIN IMMEDIATE')
+                emp = self.employee(db, employee_id)
+                safe_name = re.sub(r'[^\w\u3400-\u9fff-]', '_', emp['name'])[:60]
+                filename = f"{employee_id}_{safe_name}_{DOC_TYPES[category]}_{datetime.now(TZ):%Y%m%dT%H%M%S}_{secrets.token_hex(6)}{extension}"
+                head = stream.read(min(length, 16))
+                valid = (extension == '.pdf' and head.startswith(b'%PDF-') or extension in ['.jpg', '.jpeg'] and head.startswith(b'\xff\xd8\xff') or extension == '.png' and head.startswith(b'\x89PNG\r\n\x1a\n') or extension == '.webp' and head.startswith(b'RIFF') and head[8:12] == b'WEBP')
+                if not valid:
+                    raise Problem('檔案內容與格式不符，請重新選擇照片或PDF')
+                fd = os.open(filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640, dir_fd=directory)
+                created = True
+                with os.fdopen(fd, 'wb') as output:
+                    output.write(head)
+                    remaining = length - len(head)
+                    while remaining:
+                        block = stream.read(min(65536, remaining))
+                        if not block:
+                            raise Problem('上傳未完成，請重新選檔上傳')
+                        output.write(block)
+                        remaining -= len(block)
+                    output.flush()
+                    os.fsync(output.fileno())
+                    stat = os.fstat(output.fileno())
+                key = hashlib.sha256((category + '\0' + filename).encode()).hexdigest()
+                db.execute('INSERT INTO documents VALUES(?,?,?,?,?,?,1,?,?)', (key, category, filename, filename, stat.st_size, stat.st_mtime_ns, employee_id, compact([employee_id])))
+                self.audit(db, actor, '上傳員工文件', employee_id, category + ' ' + filename)
+            return {'id': key, 'filename': filename, 'employeeId': employee_id, 'category': category}
+        except Exception as exc:
+            if created and directory is not None:
+                os.unlink(filename, dir_fd=directory)
+            if isinstance(exc, OSError):
+                raise Problem('無法寫入NAS資料夾，請確認文件掛載已允許寫入及帳號權限', 503) from None
+            raise
+        finally:
+            if directory is not None:
+                os.close(directory)
+
+    def candidate(self, db, key):
+        row = db.execute('SELECT * FROM candidates WHERE id=?', (clean(key, 40),)).fetchone()
+        if not row:
+            raise Problem('找不到應徵者', 404)
+        return {'id': row['id'], **json.loads(row['data']), 'revision': row['revision'], 'created': row['created'], 'updated': row['updated']}
+
+    def save_candidate(self, body, actor):
+        key = clean(body.get('id'), 40) or secrets.token_hex(12)
+        fields = ['name', 'phone', 'department', 'job', 'source', 'contactPerson', 'notes']
+        data = {k: clean(body.get(k), 4000 if k == 'notes' else 200) for k in fields}
+        if not data['name'] or not data['phone']:
+            raise Problem('請填應徵者姓名及電話')
+        data.update(availableDate=valid_date(body.get('availableDate')), followupDate=valid_date(body.get('followupDate')), interviewAt=local_datetime(body.get('interviewAt')), status=clean(body.get('status') or '待聯絡', 20))
+        if data['status'] not in RECRUIT_STATUSES:
+            raise Problem('招募進度無效')
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            old = db.execute('SELECT * FROM candidates WHERE id=?', (key,)).fetchone()
+            if body.get('id') and not old:
+                raise Problem('原應徵者不存在，請重新整理', 409)
+            if old:
+                prior = self.candidate(db, key)
+                if body.get('revision') != prior['revision']:
+                    raise Problem('應徵者資料已更新，請重新整理後編輯', 409)
+                if prior.get('employeeId'):
+                    data['employeeId'], data['status'] = prior['employeeId'], '已報到'
+                db.execute('UPDATE candidates SET data=?,revision=revision+1,updated=? WHERE id=?', (compact(data), now(), key))
+            else:
+                db.execute('INSERT INTO candidates VALUES(?,?,1,?,?)', (key, compact(data), now(), now()))
+            self.audit(db, actor, '儲存應徵者', key)
+            return self.candidate(db, key)
+
+    def add_recruitment_event(self, body, actor):
+        kind = body.get('kind')
+        outcomes = {'phone': ['已接通', '未接', '忙線', '停話／錯號', '婉拒', '約定面試', '待回覆'], 'interview': ['已面試', '未到場', '改期', '錄取', '未錄取', '待回覆']}
+        if kind not in outcomes or body.get('outcome') not in outcomes[kind]:
+            raise Problem('請選電話或面試結果')
+        data = {'at': local_datetime(body.get('at'), False), 'contactPerson': clean(body.get('contactPerson'), 200), 'outcome': body['outcome'], 'notes': clean(body.get('notes'), 4000), 'nextFollowup': valid_date(body.get('nextFollowup')), 'nextInterviewAt': local_datetime(body.get('nextInterviewAt'))}
+        if not data['contactPerson']:
+            raise Problem('請填聯絡人或面試主管')
+        status = clean(body.get('status'), 20)
+        if status and status not in RECRUIT_STATUSES:
+            raise Problem('招募進度無效')
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            candidate = self.candidate(db, body.get('candidateId'))
+            if body.get('revision') != candidate['revision']:
+                raise Problem('應徵者已更新，請重新整理後新增紀錄', 409)
+            key = secrets.token_hex(12)
+            db.execute('INSERT INTO recruitment_events VALUES(?,?,?,?,?)', (key, candidate['id'], kind, compact(data), now()))
+            saved = {k: v for k, v in candidate.items() if k not in ['id', 'revision', 'created', 'updated']}
+            saved['followupDate'] = data['nextFollowup']
+            if data['nextInterviewAt']:
+                saved['interviewAt'] = data['nextInterviewAt']
+            elif kind == 'interview':
+                saved['interviewAt'] = ''
+            if status and not candidate.get('employeeId'):
+                saved['status'] = status
+            db.execute('UPDATE candidates SET data=?,revision=revision+1,updated=? WHERE id=?', (compact(saved), now(), candidate['id']))
+            self.audit(db, actor, '新增電話紀錄' if kind == 'phone' else '新增面試紀錄', candidate['id'])
+        return {'id': key}
+
+    def convert_candidate(self, body, actor):
+        employee_id = ident(body.get('employeeId'))
+        arrival = valid_date(body.get('arrivalDate'), False)
+        employment_type = clean(body.get('employmentType'), 20)
+        if employment_type not in ['正職', '時薪', '兼職']:
+            raise Problem('請選聘僱型態')
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            candidate = self.candidate(db, body.get('candidateId'))
+            if candidate.get('employeeId') or candidate['revision'] != body.get('revision'):
+                raise Problem('此應徵者已轉員工或資料已更新，請重新整理', 409)
+            if db.execute('SELECT 1 FROM employees WHERE id=?', (employee_id,)).fetchone():
+                raise Problem('員工編號已存在，未覆蓋既有員工', 409)
+            data = {k: '' for k in EMP_FIELDS}
+            for k in ['name', 'phone', 'department', 'job']:
+                data[k] = candidate[k]
+            data.update(arrivalDate=arrival, employmentType=employment_type, notes='由徵人資料轉入；招募歷程保留於徵人分頁。')
+            db.execute('INSERT INTO employees VALUES(?,?,1)', (employee_id, compact(data)))
+            saved = {k: v for k, v in candidate.items() if k not in ['id', 'revision', 'created', 'updated']}
+            saved.update(employeeId=employee_id, status='已報到', followupDate='', interviewAt='')
+            db.execute('UPDATE candidates SET data=?,revision=revision+1,updated=? WHERE id=?', (compact(saved), now(), candidate['id']))
+            self.audit(db, actor, '應徵者轉員工', employee_id, candidate['id'])
+        return {'employeeId': employee_id}
 
     def scan(self, roots, actor):
         found, errors = [], []
         with self.db() as db:
             employees = [self.employee(db, r[0]) for r in db.execute('SELECT id FROM employees').fetchall()]
         for category, root in roots.items():
-            if not root or not root.is_dir():
+            if not document_access(root)['readable']:
                 errors.append(DOC_TYPES[category] + '資料夾未設定或無法讀取')
                 continue
-            for path in root.rglob('*'):
+            paths = []
+            def walk_error(_):
+                errors.append(DOC_TYPES[category] + '有子資料夾無法讀取，請確認權限')
+            for folder, dirs, files in os.walk(root, followlinks=False, onerror=walk_error):
+                dirs[:] = [d for d in dirs if not d.startswith('.') and d != '@eaDir' and not (Path(folder) / d).is_symlink()]
+                paths.extend(Path(folder) / name for name in files)
+                if len(paths) > 20000:
+                    raise Problem('資料夾文件過多，請縮小掃描範圍')
+            for path in paths:
                 if path.is_symlink() or not path.is_file() or path.suffix.lower() not in MIMES:
+                    continue
+                # Identity and license can share one NAS folder. Do not duplicate
+                # uploaded versions into another category when scanning again.
+                managed = re.fullmatch(r'[A-Z0-9_-]+_.+_(身分證|存摺|駕照)_\d{8}T\d{6}_[a-f0-9]{12}\.[a-zA-Z]+', path.name)
+                if managed and managed[1] != DOC_TYPES[category]:
                     continue
                 try:
                     relative = str(path.relative_to(root))
@@ -457,7 +637,8 @@ class App:
                 return self.response(start_response, {'time': now()})
             if method == 'GET' and path == '/api/state':
                 csrf = secrets.token_hex(32)
-                settings = {'documentRoots': {key: bool(value and value.is_dir()) for key, value in self.roots.items()}, 'gasConfigured': bool(self.source_url and len(self.source_secret) >= 32), 'networkMode': '公司內網限定'}
+                access = {key: document_access(value) for key, value in self.roots.items()}
+                settings = {'documentRoots': {key: value['readable'] for key, value in access.items()}, 'documentAccess': access, 'uploadLimit': UPLOAD_LIMIT, 'gasConfigured': bool(self.source_url and len(self.source_secret) >= 32), 'networkMode': '公司內網限定'}
                 result = self.store.state(settings)
                 result['csrf'] = csrf
                 return self.response(start_response, result, headers=[('Set-Cookie', 'hr_csrf=' + csrf + '; HttpOnly; SameSite=Strict; Path=/' + ('; Secure' if env.get('wsgi.url_scheme') == 'https' else ''))])
@@ -504,6 +685,13 @@ class App:
                 mime = {'/': 'text/html', '/app.js': 'text/javascript', '/styles.css': 'text/css'}[path]
                 return self.response(start_response, (HERE / 'public' / name).read_bytes(), mime=mime + '; charset=utf-8')
             if method == 'POST':
+                if path == '/api/documents/upload':
+                    params = {k: v[0] for k, v in parse_qs(env.get('QUERY_STRING', '')).items()}
+                    try:
+                        length = int(env.get('CONTENT_LENGTH') or 0)
+                    except ValueError:
+                        raise Problem('上傳大小無效')
+                    return self.response(start_response, self.store.upload_document(params, env['wsgi.input'], length, self.roots, actor))
                 body = self.body(env)
                 routes = {
                     '/api/employee': lambda: self.store.save_employee(body, actor),
@@ -512,6 +700,9 @@ class App:
                     '/api/salary/status': lambda: self.store.finalize_salary(body, actor),
                     '/api/documents/scan': lambda: self.store.scan(self.roots, actor),
                     '/api/documents/bind': lambda: self.store.bind_document(body, actor),
+                    '/api/recruitment/candidate': lambda: self.store.save_candidate(body, actor),
+                    '/api/recruitment/event': lambda: self.store.add_recruitment_event(body, actor),
+                    '/api/recruitment/convert': lambda: self.store.convert_candidate(body, actor),
                     '/api/import': lambda: self.store.import_payload(body, actor),
                     '/api/sync': lambda: self.store.import_payload(fetch_source(self.source_url, self.source_secret), actor),
                 }
