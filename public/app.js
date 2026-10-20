@@ -6,7 +6,8 @@ const today = () => new Intl.DateTimeFormat('sv-SE', {timeZone:'Asia/Taipei'}).f
 let state = null, page = 'overview', employeeId = null, tab = 'basic', csrf = '', currentForm = null, busy = false;
 const pages = {overview:'待辦總覽',employees:'員工檔案',insurance:'保險異動',salary:'薪資歷史',leave:'特休紀錄',documents:'文件配對',recruitment:'徵人',settings:'連線與匯入'};
 let candidateId=null;
-let recruitFilters={query:'',department:'',status:'',date:today(),scope:'all'};
+let recruitFilters={query:'',department:'',status:'',date:today(),scope:'all',dateMode:'exact'};
+let recruitPage=1,recruitEventPage=1;
 const recruitStatuses=['待聯絡','待面試','待回覆','錄取','待報到','已報到','未錄取','放棄'];
 const localMinute=()=>today()+'T'+new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Taipei',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date());
 const candidate=id=>(state.candidates||[]).find(c=>c.id===id);
@@ -104,11 +105,35 @@ function recruitMatch(c){
 }
 function candidateList(){
   const people=(state.candidates||[]).filter(recruitMatch);
-  return table(['應徵者／電話','部門／職缺','進度','面試／下次追蹤','處理'],people.map(c=>`<tr><td><button class="employee-link" data-candidate="${esc(c.id)}">${esc(c.name)}</button><div class="muted">${esc(c.phone)}</div></td><td>${esc(c.department||'—')}<div class="muted">${esc(c.job)}</div></td><td>${badge(c.status,recruitOpen(c)&&!!c.followupDate&&c.followupDate<today())}</td><td>${esc(c.interviewAt?.replace('T',' ')||'未排面試')}<div class="muted">追蹤：${esc(c.followupDate||'未設定')}</div></td><td><div class="actions">${button('電話紀錄','recruit-phone',c.id)}${button('面試紀錄','recruit-interview',c.id)}</div></td></tr>`));
+  const start=(recruitPage-1)*50,visible=people.slice(start,start+50);
+  return recruitPager('people',people.length,recruitPage,50)+table(['應徵者／電話','部門／職缺','進度','面試／下次追蹤','處理'],visible.map(c=>`<tr><td><button class="employee-link" data-candidate="${esc(c.id)}">${esc(c.name)}</button><div class="muted">${esc(c.phone)}</div></td><td>${esc(c.department||'—')}<div class="muted">${esc(c.job)}</div></td><td>${badge(c.status,recruitOpen(c)&&!!c.followupDate&&c.followupDate<today())}</td><td>${esc(c.interviewAt?.replace('T',' ')||'未排面試')}<div class="muted">追蹤：${esc(c.followupDate||'未設定')}</div></td><td><div class="actions">${button('電話紀錄','recruit-phone',c.id)}${button('面試紀錄','recruit-interview',c.id)}</div></td></tr>`));
 }
+function recruitPager(kind,total,page,size){return `<div class="toolbar"><span class="muted">共 ${total} 筆｜第 ${page}／${Math.max(1,Math.ceil(total/size))} 頁</span>${page>1?`<button class="quiet small" data-recruit-pager="${kind}" data-direction="-1">上一頁</button>`:''}${page*size<total?`<button class="quiet small" data-recruit-pager="${kind}" data-direction="1">下一頁</button>`:''}</div>`;}
 function recruitEvents(id=null){
-  const rows=(state.recruitmentEvents||[]).filter(r=>id?r.candidateId===id:r.at.slice(0,10)===recruitFilters.date&&candidate(r.candidateId)&&recruitMatch(candidate(r.candidateId))).sort((a,b)=>b.at.localeCompare(a.at)||b.created.localeCompare(a.created));
-  return table(id?['日期時間','種類／結果','聯絡人／主管','紀錄／後續']:['日期時間','應徵者','種類／結果','聯絡人／主管','紀錄／後續'],rows.map(r=>`<tr><td>${esc(r.at.replace('T',' '))}</td>${id?'':`<td><button class="employee-link" data-candidate="${esc(r.candidateId)}">${esc(candidate(r.candidateId)?.name||'—')}</button></td>`}<td>${r.kind==='phone'?'電話':'面試'}<br>${esc(r.outcome)}</td><td>${esc(r.contactPerson)}</td><td class="record-notes">${esc(r.notes||'—')}${r.nextFollowup?`<div class="muted">下次追蹤：${esc(r.nextFollowup)}</div>`:''}${r.nextInterviewAt?`<div class="muted">預約面試：${esc(r.nextInterviewAt.replace('T',' '))}</div>`:''}</td></tr>`));
+  const rows=(state.recruitmentEvents||[]).filter(r=>{
+    if(id)return r.candidateId===id;
+    const date=r.contactDate||r.at.slice(0,10),match=recruitFilters.dateMode==='unknown'?!date:date===recruitFilters.date;
+    return match&&candidate(r.candidateId)&&recruitMatch(candidate(r.candidateId));
+  }).sort((a,b)=>(b.at||b.contactDate||b.rangeEnd||'').localeCompare(a.at||a.contactDate||a.rangeEnd||'')||b.created.localeCompare(a.created));
+  const selected=id?rows:rows.slice((recruitEventPage-1)*100,recruitEventPage*100);
+  return (id?'':recruitPager('events',rows.length,recruitEventPage,100))+table(id?['日期時間','種類／結果','聯絡人／主管','紀錄／後續']:['日期時間','應徵者','種類／結果','聯絡人／主管','紀錄／後續'],selected.map(r=>`<tr><td>${esc(r.at?r.at.replace('T',' '):r.contactDate||'日期未明')}${!r.at&&r.rawCallTime?`<div class="muted">原撥打時間：${esc(r.rawCallTime)}</div>`:''}${r.imported?`<div class="muted">原分頁：${esc(r.sourceSheet)}<br>第 ${esc(r.sourceRow)} 列</div>`:''}</td>${id?'':`<td><button class="employee-link" data-candidate="${esc(r.candidateId)}">${esc(candidate(r.candidateId)?.name||'—')}</button></td>`}<td>${r.imported?'Excel歷史紀錄':r.kind==='phone'?'電話':'面試'}<br>${esc(r.outcome)}</td><td>${esc(r.contactPerson)}</td><td class="record-notes">${esc(r.notes||'—')}${r.nextFollowup?`<div class="muted">下次追蹤：${esc(r.nextFollowup)}</div>`:''}${r.nextInterviewAt?`<div class="muted">預約面試：${esc(r.nextInterviewAt.replace('T',' '))}</div>`:''}</td></tr>`));
+}
+async function previewRecruitmentFile(file){
+  if(busy||!file)return;busy=true;document.querySelectorAll('button').forEach(b=>b.disabled=true);
+  try{
+    if(file.size>20*1024*1024)throw Error('徵人匯入檔案上限20MB');
+    let preview;
+    if(/\.json$/i.test(file.name))preview=await request('/api/recruitment/import-preview',JSON.parse(await file.text()));
+    else{
+      const start=$('recruit-import-start').value,end=$('recruit-import-end').value;
+      if(!start||!end||start>end)throw Error('請先設定有效的匯入日期範圍');
+      const params=new URLSearchParams({start,end,filename:file.name});
+      const response=await fetch('/api/recruitment/excel-preview?'+params,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/octet-stream','X-HR-CSRF':csrf},body:file});
+      preview=await response.json();if(!response.ok)throw Error(preview.error||'Excel讀取失敗');
+    }
+    openForm('recruit-import','',preview);
+  }catch(e){notify(e.message,true);}
+  finally{busy=false;document.querySelectorAll('button').forEach(b=>b.disabled=false);}
 }
 function recruitment(){
   if(candidateId){
@@ -118,7 +143,7 @@ function recruitment(){
   }
   const people=state.candidates||[],open=people.filter(recruitOpen),departments=[...new Set(people.map(c=>c.department).filter(Boolean))].sort();
   const counts=[['due','今日待聯絡',open.filter(c=>c.followupDate&&c.followupDate<=today()).length],['interview','今日面試',open.filter(c=>c.interviewAt?.slice(0,10)===today()).length],['overdue','逾期追蹤',open.filter(c=>c.followupDate&&c.followupDate<today()).length],['onboard','待報到',people.filter(c=>c.status==='待報到').length]];
-  return heading('徵人',today()+'｜電話聯絡、面試及報到進度',button('新增應徵者','candidate'))+`<div class="stats">${counts.map(([k,t,n])=>`<button class="stat recruit-stat ${recruitFilters.scope===k?'selected':''}" data-recruit-scope="${k}"><span>${t}</span><strong>${n}</strong></button>`).join('')}</div><div class="toolbar"><input id="recruit-search" aria-label="搜尋應徵者" placeholder="搜尋姓名、電話或職缺" value="${esc(recruitFilters.query)}"><select id="recruit-department" aria-label="招募部門"><option value="">全部部門</option>${departments.map(d=>`<option ${d===recruitFilters.department?'selected':''}>${esc(d)}</option>`).join('')}</select><select id="recruit-status" aria-label="招募進度"><option value="">全部進度</option>${recruitStatuses.map(d=>`<option ${d===recruitFilters.status?'selected':''}>${esc(d)}</option>`).join('')}</select><button class="quiet" data-recruit-scope="all">全部人員</button></div><section class="panel"><h2>應徵者名單</h2><div id="candidate-list">${candidateList()}</div></section><section class="panel"><div class="page-head"><h2>每日電話與面試紀錄</h2><label>紀錄日期<input id="recruit-date" type="date" value="${esc(recruitFilters.date)}"></label></div><div id="recruit-events">${recruitEvents()}</div></section>`;
+  return heading('徵人',today()+'｜電話聯絡、面試及報到進度',button('新增應徵者','candidate'))+`<section class="panel"><h2>匯入Excel應徵資料</h2><div class="toolbar"><label>匯入開始日<input id="recruit-import-start" type="date" value="2026-07-01"></label><label>匯入截止日<input id="recruit-import-end" type="date" value="${today()}"></label><button data-recruit-import>選擇Excel／整理檔</button><input id="recruit-import-file" type="file" accept=".xlsx,.xls,.json" hidden></div><p class="muted">先預覽再匯入；依姓名＋電話合併人員，已匯入的相同來源列不重複新增。原分頁跨多日時保留日期範圍。</p></section>`+`<div class="stats">${counts.map(([k,t,n])=>`<button class="stat recruit-stat ${recruitFilters.scope===k?'selected':''}" data-recruit-scope="${k}"><span>${t}</span><strong>${n}</strong></button>`).join('')}</div><div class="toolbar"><input id="recruit-search" aria-label="搜尋應徵者" placeholder="搜尋姓名、電話或職缺" value="${esc(recruitFilters.query)}"><select id="recruit-department" aria-label="招募部門"><option value="">全部部門</option>${departments.map(d=>`<option ${d===recruitFilters.department?'selected':''}>${esc(d)}</option>`).join('')}</select><select id="recruit-status" aria-label="招募進度"><option value="">全部進度</option>${recruitStatuses.map(d=>`<option ${d===recruitFilters.status?'selected':''}>${esc(d)}</option>`).join('')}</select><button class="quiet" data-recruit-scope="all">全部人員</button></div><section class="panel"><h2>應徵者名單</h2><div id="candidate-list">${candidateList()}</div></section><section class="panel"><div class="page-head"><h2>每日電話與面試紀錄</h2><select id="recruit-date-mode" aria-label="歷史日期篩選"><option value="exact" ${recruitFilters.dateMode==='exact'?'selected':''}>有明確日期</option><option value="unknown" ${recruitFilters.dateMode==='unknown'?'selected':''}>日期未明（全部原分頁）</option></select><label>紀錄日期<input id="recruit-date" type="date" value="${esc(recruitFilters.date)}"></label></div><div id="recruit-events">${recruitEvents()}</div></section>`;
 }
 function refreshRecruitLists(){if($('candidate-list'))$('candidate-list').innerHTML=candidateList();if($('recruit-events'))$('recruit-events').innerHTML=recruitEvents();}
 async function prepareDocument(file){
@@ -151,7 +176,11 @@ function field(label,name,value='',type='text',required=false,wide=false){return
 function select(label,name,options,value=''){return `<label>${esc(label)}<select name="${name}" required>${options.map(v=>`<option value="${esc(v)}" ${v===value?'selected':''}>${esc(v)}</option>`).join('')}</select></label>`;}
 function openForm(kind,id='',extra=null){
   currentForm={kind,id,extra};$('form-error').textContent='';let fields='';
-  if(kind==='upload'){
+  $('save-form').textContent=kind==='recruit-import'?'確認匯入':'儲存';
+  if(kind==='recruit-import'){
+    $('dialog-title').textContent='確認匯入徵人資料';currentForm.payload=extra.payload;
+    const m=extra.summary;fields=`<div class="wide notice">${esc(extra.payload.startDate)}～${esc(extra.payload.endDate)}<br>來源 ${m.rows} 列／依姓名電話合併 ${m.people} 人<br>待新增 ${m.newRows} 列／相同來源略過 ${m.repeatedRows} 列<br>${(extra.warnings||[]).map(esc).join('<br>')}</div><div class="wide">${table(['姓名','電話','原分頁'],extra.payload.records.slice(0,20).map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.phone)}</td><td>${esc(r.sourceSheet)}</td></tr>`))}<p class="muted">預覽前20列；按確認後匯入全部範圍內資料。既有人工編輯資料保留。</p></div>`;
+  }else if(kind==='upload'){
     $('dialog-title').textContent='上傳員工文件';
     fields=`<label>員工<select name="employeeId" required>${employeeOptions(id)}</select></label><label>文件類型<select name="category" required>${Object.entries(categoryNames).map(([k,v])=>`<option value="${k}" ${extra===k?'selected':''}>${v}</option>`).join('')}</select></label><label class="wide">選擇文件<input id="document-file" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp,.heic,.heif,image/*"></label><label class="wide">或用手機／平板拍照<input id="document-camera" type="file" accept="image/*" capture="environment"></label><p id="upload-selection" class="wide muted">單份上限12MB；每次上傳保留新檔，會自動綁定所選員工。</p>`;
   }else if(kind==='candidate'){
@@ -193,7 +222,9 @@ document.addEventListener('click',async event=>{
     if(b.dataset.page){page=b.dataset.page;employeeId=null;candidateId=null;tab='basic';render();}
     else if(b.dataset.candidate){page='recruitment';candidateId=b.dataset.candidate;render();}
     else if(b.hasAttribute('data-recruit-back')){candidateId=null;render();}
-    else if(b.dataset.recruitScope){recruitFilters.scope=b.dataset.recruitScope;render();}
+    else if(b.dataset.recruitScope){recruitFilters.scope=b.dataset.recruitScope;recruitPage=1;recruitEventPage=1;render();}
+    else if(b.dataset.recruitPager){if(b.dataset.recruitPager==='people')recruitPage+=Number(b.dataset.direction);else recruitEventPage+=Number(b.dataset.direction);refreshRecruitLists();}
+    else if(b.hasAttribute('data-recruit-import'))$('recruit-import-file').click();
     else if(b.dataset.upload)openForm('upload',b.dataset.id,b.dataset.upload);
     else if(b.dataset.employee){page='employees';employeeId=b.dataset.employee;tab='basic';render();}
     else if(b.dataset.tab){tab=b.dataset.tab;render();}
@@ -213,9 +244,10 @@ document.addEventListener('click',async event=>{
     else if(b.id==='import-button')$('import-file').click();
   }catch{/* Action already displays errors. */}
 });
-document.addEventListener('input',event=>{if(event.target.id==='recruit-search'){recruitFilters.query=event.target.value;refreshRecruitLists();}if(event.target.id==='employee-search')$('employee-table').innerHTML=employeeTable(event.target.value,$('employee-filter').value);});
+document.addEventListener('input',event=>{if(event.target.id==='recruit-search'){recruitFilters.query=event.target.value;recruitPage=1;recruitEventPage=1;refreshRecruitLists();}if(event.target.id==='employee-search')$('employee-table').innerHTML=employeeTable(event.target.value,$('employee-filter').value);});
 document.addEventListener('change',async event=>{
-  const recruitKeys={'recruit-department':'department','recruit-status':'status','recruit-date':'date'};if(recruitKeys[event.target.id]){recruitFilters[recruitKeys[event.target.id]]=event.target.value;refreshRecruitLists();}
+  const recruitKeys={'recruit-department':'department','recruit-status':'status','recruit-date':'date','recruit-date-mode':'dateMode'};if(recruitKeys[event.target.id]){recruitFilters[recruitKeys[event.target.id]]=event.target.value;recruitPage=1;recruitEventPage=1;refreshRecruitLists();}
+  if(event.target.id==='recruit-import-file'){const file=event.target.files[0];try{await previewRecruitmentFile(file);}finally{event.target.value='';}}
   if(['document-file','document-camera'].includes(event.target.id)){currentForm.file=event.target.files[0];$('upload-selection').textContent=currentForm.file?'已選擇：'+currentForm.file.name:'尚未選擇檔案';}
 
   if(event.target.id==='employee-filter')$('employee-table').innerHTML=employeeTable($('employee-search').value,event.target.value);
@@ -228,6 +260,7 @@ document.addEventListener('change',async event=>{
 $('edit-form').addEventListener('submit',async event=>{
   event.preventDefault();if(busy)return;const body=Object.fromEntries(new FormData(event.target));
   const form=currentForm;let endpoint;
+  if(form.kind==='recruit-import'){try{const r=await action('/api/recruitment/import',form.payload,'徵人資料已匯入NAS。');notify('匯入完成：新增 '+r.counts.candidates+' 位應徵者、'+r.counts.events+' 筆聯絡紀錄；相同來源略過 '+r.counts.skipped+' 列。');$('form-dialog').close();}catch(e){$('form-error').textContent=e.message;}return;}
   if(form.kind==='upload'){try{await uploadDocument(body,form.file);$('form-dialog').close();}catch(e){$('form-error').textContent=e.message;}return;}
   if(form.kind==='candidate'){endpoint='/api/recruitment/candidate';if(form.id){body.id=form.id;body.revision=form.revision;}}
   else if(form.kind.startsWith('recruit-')){const c=candidate(form.id);body.candidateId=c.id;body.revision=form.revision;endpoint=form.kind==='recruit-convert'?'/api/recruitment/convert':'/api/recruitment/event';if(form.kind!=='recruit-convert')body.kind=form.kind==='recruit-phone'?'phone':'interview';}

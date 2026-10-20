@@ -72,3 +72,7 @@ python3 server.py
 備份 `/data` 對應的整個 NAS 資料庫資料夾，以及原三個證件資料夾。SQLite 使用 WAL，備份時請先停止 `baiqi-hr` 容器再做檔案備份，或使用 SQLite backup API；不要只複製運行中的 `hr.sqlite3` 而忽略 WAL。
 
 NAS 不是備份本身。建議加密的異地版本備份，定期測試還原。原有設備與 AI 系統不需停止或改設定。
+
+## 徵人Excel匯入
+
+徵人頁可直接選擇Excel（.xlsx／.xls）或徵人整理檔，依日期範圍預覽後匯入。同姓名電話合併、保留各次歷程、重複來源略過；跨多日且日期不明的原分頁保留範圍，不推定聯絡日期。詳見 [匯入說明](docs/RECRUITMENT-EXCEL.md)。

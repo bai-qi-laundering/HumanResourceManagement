@@ -109,6 +109,7 @@ class Store:
                 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS candidates(id TEXT PRIMARY KEY, data TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1, created TEXT NOT NULL, updated TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS recruitment_events(id TEXT PRIMARY KEY, candidate_id TEXT NOT NULL REFERENCES candidates(id), kind TEXT NOT NULL, data TEXT NOT NULL, created TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS recruitment_import_rows(id TEXT PRIMARY KEY, candidate_id TEXT NOT NULL REFERENCES candidates(id), data TEXT NOT NULL, created TEXT NOT NULL);
             ''')
         os.chmod(self.path, 0o600)
 
@@ -360,6 +361,7 @@ class Store:
             key = secrets.token_hex(12)
             db.execute('INSERT INTO recruitment_events VALUES(?,?,?,?,?)', (key, candidate['id'], kind, compact(data), now()))
             saved = {k: v for k, v in candidate.items() if k not in ['id', 'revision', 'created', 'updated']}
+            saved['importManaged'] = False  # Manual follow-up takes precedence over future Excel imports.
             saved['followupDate'] = data['nextFollowup']
             if data['nextInterviewAt']:
                 saved['interviewAt'] = data['nextInterviewAt']
@@ -394,6 +396,96 @@ class Store:
             db.execute('UPDATE candidates SET data=?,revision=revision+1,updated=? WHERE id=?', (compact(saved), now(), candidate['id']))
             self.audit(db, actor, '應徵者轉員工', employee_id, candidate['id'])
         return {'employeeId': employee_id}
+
+    def recruitment_payload(self, payload):
+        if payload.get('schema') != 'baiqi-recruitment' or payload.get('version') != 1:
+            raise Problem('請選徵人Excel或本系統的徵人整理檔')
+        start, end = valid_date(payload.get('startDate'), False), valid_date(payload.get('endDate'), False)
+        rows = payload.get('records')
+        if start > end or not isinstance(rows, list) or not 0 < len(rows) <= 10000:
+            raise Problem('沒有範圍內的應徵紀錄，或匯入筆數超過10000列')
+        prepared = []
+        for raw in rows:
+            if not isinstance(raw, dict):
+                raise Problem('徵人紀錄格式錯誤')
+            fields = ['name', 'phone', 'job', 'gender', 'age', 'source', 'sourceFile', 'sourceSheet', 'rawCallTime', 'rawInterviewAt']
+            r = {k: clean(raw.get(k), 250) for k in fields}
+            r.update(notes=clean(raw.get('notes'), 4000), again=clean(raw.get('again'), 4000),
+                     rangeStart=valid_date(raw.get('rangeStart'), False), rangeEnd=valid_date(raw.get('rangeEnd'), False),
+                     callDate=valid_date(raw.get('callDate')), callTime=clean(raw.get('callTime'), 5),
+                     interviewAt=local_datetime(raw.get('interviewAt')), sourceRow=int(number(raw.get('sourceRow'), 1, 1000000)))
+            if not r['name'] or not r['sourceSheet'] or not start <= r['rangeStart'] <= r['rangeEnd'] <= end:
+                raise Problem('匯入列缺少姓名、來源，或日期超出所選範圍')
+            if r['callDate'] and not r['rangeStart'] <= r['callDate'] <= r['rangeEnd']:
+                raise Problem('聯絡日期超出原分頁日期範圍')
+            if r['callTime'] and not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', r['callTime']):
+                raise Problem('撥打時間格式錯誤')
+            prepared.append(r)
+        return {'schema': 'baiqi-recruitment', 'version': 1, 'startDate': start, 'endDate': end, 'records': prepared}
+
+    @staticmethod
+    def recruitment_row_key(row):
+        return hashlib.sha256(compact({k: v for k, v in row.items() if k != 'sourceFile'}).encode()).hexdigest()
+
+    @staticmethod
+    def recruitment_person_key(name, phone, fallback):
+        digits = re.sub(r'\D', '', phone)
+        return (re.sub(r'\s', '', name).casefold(), digits) if digits else ('missing-phone', fallback)
+
+    def preview_recruitment(self, payload):
+        payload = self.recruitment_payload(payload)
+        keys = {self.recruitment_row_key(r) for r in payload['records']}
+        with self.db() as db:
+            existing = {r[0] for r in db.execute('SELECT id FROM recruitment_import_rows')}
+        people = {self.recruitment_person_key(r['name'], r['phone'], self.recruitment_row_key(r)) for r in payload['records']}
+        ambiguous = sum(not r['callDate'] for r in payload['records'])
+        warnings = []
+        if ambiguous:
+            warnings.append(f'{ambiguous}列的原分頁合併多日；保留原日期範圍，不指定某一天。')
+        return {'payload': payload, 'summary': {'rows': len(payload['records']), 'people': len(people), 'newRows': len(keys - existing), 'repeatedRows': len(payload['records']) - len(keys - existing), 'unknownDates': ambiguous}, 'warnings': warnings}
+
+    def import_recruitment(self, payload, actor):
+        payload = self.recruitment_payload(payload)
+        counts = {'candidates': 0, 'rows': 0, 'events': 0, 'skipped': 0}
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            people = {}
+            for row in db.execute('SELECT id,data FROM candidates ORDER BY created,id'):
+                c = json.loads(row['data'])
+                key = self.recruitment_person_key(c['name'], c['phone'], row['id'])
+                people.setdefault(key, []).append(row['id'])
+            for r in sorted(payload['records'], key=lambda r: (r['rangeEnd'], r['sourceSheet'], r['sourceRow'])):
+                source_key = self.recruitment_row_key(r)
+                if db.execute('SELECT 1 FROM recruitment_import_rows WHERE id=?', (source_key,)).fetchone():
+                    counts['skipped'] += 1
+                    continue
+                person_key = self.recruitment_person_key(r['name'], r['phone'], source_key)
+                matches = people.get(person_key, [])
+                if len(matches) > 1:
+                    raise Problem('已有多位相同姓名及電話的應徵者，請先整理重複人員後再匯入', 409)
+                key = matches[0] if matches else secrets.token_hex(12)
+                note = '\n'.join(filter(None, [r['notes'], '再次撥打：' + r['again'] if r['again'] else '']))
+                status = '放棄' if any(v in note for v in ['已拒絕', '婉拒']) else '待面試' if r['interviewAt'] else '待回覆' if note or r['callTime'] else '待聯絡'
+                raw_meta = '；'.join(filter(None, ['原檔性別：' + r['gender'] if r['gender'] else '', '原檔年齡：' + r['age'] if r['age'] else '']))
+                rank = r['rangeEnd'] + ':' + r['sourceSheet'] + ':' + str(r['sourceRow']).zfill(7)
+                c = {'name': r['name'], 'phone': r['phone'], 'department': '', 'job': r['job'], 'source': r['source'], 'contactPerson': '', 'notes': '\n'.join(filter(None, [raw_meta, note])), 'availableDate': '', 'followupDate': '', 'interviewAt': r['interviewAt'], 'status': status, 'importManaged': True, 'importRank': rank}
+                if not matches:
+                    db.execute('INSERT INTO candidates VALUES(?,?,1,?,?)', (key, compact(c), now(), now()))
+                    people[person_key] = [key]
+                    counts['candidates'] += 1
+                else:
+                    old = self.candidate(db, key)
+                    if old.get('importManaged') and not old.get('employeeId') and rank > old.get('importRank', ''):
+                        db.execute('UPDATE candidates SET data=?,revision=revision+1,updated=? WHERE id=?', (compact(c), now(), key))
+                db.execute('INSERT INTO recruitment_import_rows VALUES(?,?,?,?)', (source_key, key, compact(r), now()))
+                counts['rows'] += 1
+                # Blank contact columns mean only an applicant list, not a call.
+                if note or r['callTime'] or r['rawCallTime'] or r['interviewAt'] or r['rawInterviewAt']:
+                    event = {'at': r['callDate'] + 'T' + r['callTime'] if r['callDate'] and r['callTime'] else '', 'contactDate': r['callDate'], 'contactPerson': '原Excel未記載', 'outcome': '原Excel紀錄', 'notes': '\n'.join(filter(None, [raw_meta, note, '原面試時間：' + r['rawInterviewAt'] if r['rawInterviewAt'] else ''])), 'nextFollowup': '', 'nextInterviewAt': '', 'sourceSheet': r['sourceSheet'], 'sourceRow': r['sourceRow'], 'sourceFile': r['sourceFile'], 'rangeStart': r['rangeStart'], 'rangeEnd': r['rangeEnd'], 'rawCallTime': r['rawCallTime'], 'imported': True}
+                    db.execute('INSERT INTO recruitment_events VALUES(?,?,?,?,?)', ('import-' + source_key, key, 'phone', compact(event), now()))
+                    counts['events'] += 1
+            self.audit(db, actor, '匯入徵人Excel', '', compact(counts))
+        return {'counts': counts, 'warnings': ['原檔多日合併的紀錄已保留日期範圍；可在徵人頁選「日期未明」查看。'] if any(not r['callDate'] for r in payload['records']) else []}
 
     def scan(self, roots, actor):
         found, errors = [], []
@@ -685,6 +777,28 @@ class App:
                 mime = {'/': 'text/html', '/app.js': 'text/javascript', '/styles.css': 'text/css'}[path]
                 return self.response(start_response, (HERE / 'public' / name).read_bytes(), mime=mime + '; charset=utf-8')
             if method == 'POST':
+                if path == '/api/recruitment/excel-preview':
+                    from recruitment_excel import read_excel
+                    params = {k: v[0] for k, v in parse_qs(env.get('QUERY_STRING', '')).items()}
+                    start, end = valid_date(params.get('start'), False), valid_date(params.get('end'), False)
+                    if start > end:
+                        raise Problem('匯入開始日不可晚於結束日')
+                    try:
+                        length = int(env.get('CONTENT_LENGTH') or 0)
+                    except ValueError:
+                        raise Problem('Excel大小無效')
+                    if not 0 < length <= 20 * 1024 * 1024:
+                        raise Problem('Excel上限20MB', 413)
+                    raw = env['wsgi.input'].read(length)
+                    if len(raw) != length:
+                        raise Problem('Excel上傳未完成')
+                    try:
+                        parsed = read_excel(raw, clean(params.get('filename'), 250), start, end)
+                    except Exception:
+                        raise Problem('Excel無法讀取，請確認為未加密的.xlsx或.xls檔及正確日期範圍') from None
+                    preview = self.store.preview_recruitment(parsed)
+                    preview['warnings'].extend(parsed.get('warnings', []))
+                    return self.response(start_response, preview)
                 if path == '/api/documents/upload':
                     params = {k: v[0] for k, v in parse_qs(env.get('QUERY_STRING', '')).items()}
                     try:
@@ -703,6 +817,8 @@ class App:
                     '/api/recruitment/candidate': lambda: self.store.save_candidate(body, actor),
                     '/api/recruitment/event': lambda: self.store.add_recruitment_event(body, actor),
                     '/api/recruitment/convert': lambda: self.store.convert_candidate(body, actor),
+                    '/api/recruitment/import-preview': lambda: self.store.preview_recruitment(body),
+                    '/api/recruitment/import': lambda: self.store.import_recruitment(body, actor),
                     '/api/import': lambda: self.store.import_payload(body, actor),
                     '/api/sync': lambda: self.store.import_payload(fetch_source(self.source_url, self.source_secret), actor),
                 }

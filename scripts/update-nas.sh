@@ -49,8 +49,10 @@ print("資料庫備份完成：",path.name)
 mkdir -p backups
 chmod 700 backups
 STAMP=$(date +%Y%m%d-%H%M%S)
-tar -czf "backups/code-before-upload-recruitment-$STAMP.tar.gz" server.py public Dockerfile compose.yaml requirements.txt
-for item in server.py Dockerfile compose.yaml requirements.txt README.md .env.example; do
+set -- server.py public Dockerfile compose.yaml requirements.txt
+if [ -f recruitment_excel.py ]; then set -- "$@" recruitment_excel.py; fi
+tar -czf "backups/code-before-upload-recruitment-$STAMP.tar.gz" "$@"
+for item in server.py recruitment_excel.py Dockerfile compose.yaml requirements.txt README.md .env.example; do
   cp "$SOURCE_DIR/$item" "$PROJECT_DIR/$item"
 done
 for item in public docs scripts; do

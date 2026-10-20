@@ -30,6 +30,12 @@ vm.createContext(context);vm.runInContext(fs.readFileSync('public/app.js','utf8'
  await get('edit-form').listeners.submit({preventDefault(){},target:{}});assert.equal(sent.at(-1).path,'/api/recruitment/convert');
  context.openForm('upload','TEST001','bank');vm.runInContext("currentForm.file={name:'test.pdf',type:'application/pdf',size:30}",context);formEntries=[['employeeId','TEST001'],['category','bank']];context.URLSearchParams=URLSearchParams;
  await get('edit-form').listeners.submit({preventDefault(){},target:{}});assert(sent.at(-1).path.startsWith('/api/documents/upload?'));assert.equal(sent.at(-1).options.body.name,'test.pdf');assert.equal(sent.at(-1).options.headers['X-HR-CSRF'],'a'.repeat(64));
+ const payload={schema:'baiqi-recruitment',version:1,startDate:'2026-07-01',endDate:'2026-10-20',records:[{name:'測試人員',phone:'0900000001',sourceSheet:'115年7月1日'}]};
+ context.openForm('recruit-import','',{payload,summary:{rows:1,people:1,newRows:1,repeatedRows:0},warnings:[]});assert(get('form-fields').innerHTML.includes('測試人員'));assert.equal(get('save-form').textContent,'確認匯入');
+ context.fetch=async(path,options)=>{if(options?.method==='POST')sent.push({path,options});return {ok:true,json:async()=>path==='/api/recruitment/import'?{counts:{candidates:1,events:1,skipped:0}}:fixtures};};
+ await get('edit-form').listeners.submit({preventDefault(){},target:{}});assert.equal(sent.at(-1).path,'/api/recruitment/import');
+ fixtures.recruitmentEvents.push({id:'unknown1',candidateId:'candidate1',kind:'phone',at:'',contactDate:'',rangeStart:'2026-07-02',rangeEnd:'2026-07-08',sourceSheet:'115年7月2日8日',sourceRow:2,rawCallTime:'10:00',imported:true,outcome:'原Excel紀錄',notes:'日期未填',created:'2026-10-20T10:00'});
+ vm.runInContext("page='recruitment';candidateId=null;recruitFilters.dateMode='unknown';render();",context);assert(get('content').innerHTML.includes('日期未填'));assert(get('content').innerHTML.includes('原撥打時間'));
  context.fetch=async()=>{throw Error('offline');};await heartbeat();assert(get('content').innerHTML.includes('公司網路連線中斷'));assert.equal(vm.runInContext('state',context),null);
  console.log('PASS: all application views, employee tabs/forms, escaped names, disconnect clears loaded data.');
 })().catch(e=>{console.error(e);process.exitCode=1;});
