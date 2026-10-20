@@ -14,7 +14,7 @@ cd "$PROJECT_DIR"
 [ -f .env ] || { echo '找不到原本的.env，請確認專案路徑'; exit 1; }
 exec > "$PROJECT_DIR/hr-update.log" 2>&1
 date
-echo '開始更新人資文件上傳及徵人功能'
+echo '開始更新百麒人資系統'
 STAGE_DIR=$(mktemp -d)
 trap 'rm -rf "$STAGE_DIR"' EXIT HUP INT TERM
 curl --fail --location --retry 2 --proto '=https' "https://github.com/bai-qi-laundering/HumanResourceManagement/archive/$UPDATE_REF.zip" -o "$STAGE_DIR/source.zip"
@@ -51,8 +51,9 @@ chmod 700 backups
 STAMP=$(date +%Y%m%d-%H%M%S)
 set -- server.py public Dockerfile compose.yaml requirements.txt
 if [ -f recruitment_excel.py ]; then set -- "$@" recruitment_excel.py; fi
+if [ -f leave_excel.py ]; then set -- "$@" leave_excel.py; fi
 tar -czf "backups/code-before-upload-recruitment-$STAMP.tar.gz" "$@"
-for item in server.py recruitment_excel.py Dockerfile compose.yaml requirements.txt README.md .env.example; do
+for item in server.py recruitment_excel.py leave_excel.py Dockerfile compose.yaml requirements.txt README.md .env.example; do
   cp "$SOURCE_DIR/$item" "$PROJECT_DIR/$item"
 done
 for item in public docs scripts; do
@@ -62,5 +63,5 @@ done
 compose up -d --build --no-deps --force-recreate hr
 sleep 3
 [ "$(docker inspect -f '{{.State.Running}}' baiqi-hr)" = true ] || { echo '容器未正常運作，請查看容器日誌；程式及資料庫備份均已保留'; exit 1; }
-echo '更新完成。請重新整理人資網頁，確認徵人分頁及證件文件的上傳按鈕。'
+echo '更新完成。請重新整理人資網頁，確認特休Excel匯入及徵人需求進度。'
 echo '文件上傳仍需原NAS帳號對文件資料夾具有寫入權限；.env及既有文件均未修改。'

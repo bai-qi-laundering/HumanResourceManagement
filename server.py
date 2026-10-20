@@ -110,6 +110,8 @@ class Store:
                 CREATE TABLE IF NOT EXISTS candidates(id TEXT PRIMARY KEY, data TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1, created TEXT NOT NULL, updated TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS recruitment_events(id TEXT PRIMARY KEY, candidate_id TEXT NOT NULL REFERENCES candidates(id), kind TEXT NOT NULL, data TEXT NOT NULL, created TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS recruitment_import_rows(id TEXT PRIMARY KEY, candidate_id TEXT NOT NULL REFERENCES candidates(id), data TEXT NOT NULL, created TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS recruitment_goals(department TEXT PRIMARY KEY, data TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1);
+                CREATE TABLE IF NOT EXISTS leave_import_rows(id TEXT PRIMARY KEY, employee_id TEXT REFERENCES employees(id), data TEXT NOT NULL, created TEXT NOT NULL);
             ''')
         os.chmod(self.path, 0o600)
 
@@ -254,7 +256,122 @@ class Store:
             candidates = [self.candidate(db, r[0]) for r in db.execute('SELECT id FROM candidates ORDER BY updated DESC,id').fetchall()]
             recruitment_events = [{'id': r['id'], 'candidateId': r['candidate_id'], 'kind': r['kind'], 'created': r['created'], **json.loads(r['data'])} for r in db.execute('SELECT * FROM recruitment_events ORDER BY created DESC,id DESC')]
             last = db.execute("SELECT value FROM settings WHERE key='lastImport'").fetchone()
-        return {'employees': employees, 'records': records, 'salaries': salaries, 'documents': docs, 'attendance': attendance, 'candidates': candidates, 'recruitmentEvents': recruitment_events, 'audit': audit, 'lastImport': json.loads(last[0]) if last else None, 'settings': settings}
+            leave_excel = [{'id': r['id'], 'employeeId': r['employee_id'], 'created': r['created'], **json.loads(r['data'])} for r in db.execute('SELECT * FROM leave_import_rows ORDER BY created DESC,id')]
+            goals = self.goal_progress(db, employees)
+        return {'employees': employees, 'records': records, 'salaries': salaries, 'documents': docs, 'attendance': attendance, 'candidates': candidates, 'recruitmentEvents': recruitment_events, 'recruitmentGoals': goals, 'leaveExcel': leave_excel, 'audit': audit, 'lastImport': json.loads(last[0]) if last else None, 'settings': settings}
+
+    def goal_progress(self, db, employees, as_of=None):
+        day = as_of or datetime.now(TZ).date().isoformat()
+        results = []
+        for r in db.execute('SELECT * FROM recruitment_goals ORDER BY department'):
+            g = json.loads(r['data'])
+            current = sum(1 for e in employees if e.get('department') == r['department'] and (not e.get('arrivalDate') or e['arrivalDate'] <= day) and (not e.get('departureDate') or e['departureDate'] >= day))
+            net = current - g['baseline']
+            results.append({'department': r['department'], **g, 'revision': r['revision'], 'current': current, 'netFilled': net, 'filled': min(g['required'], max(0, net)), 'remaining': max(0, g['required'] - net), 'percent': round(min(g['required'], max(0, net)) / g['required'] * 100, 1), 'asOf': day})
+        return results
+
+    def add_goal(self, body, actor):
+        dept = clean(body.get('department'), 200)
+        amount = number(body.get('additional'), 1, 10000)
+        if not dept or amount != int(amount):
+            raise Problem('請填部門及正整數需求人數')
+        note = clean(body.get('notes'), 1000)
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            old = db.execute('SELECT * FROM recruitment_goals WHERE department=?', (dept,)).fetchone()
+            at = now()
+            if old:
+                if body.get('revision') != old['revision']:
+                    raise Problem('需求已更新，請重新整理後再增加', 409)
+                data = json.loads(old['data'])
+                data['required'] += int(amount)
+                data['history'].append({'at': at, 'additional': int(amount), 'notes': note})
+                db.execute('UPDATE recruitment_goals SET data=?,revision=revision+1 WHERE department=?', (compact(data), dept))
+            else:
+                if body.get('revision'):
+                    raise Problem('原需求不存在，請重新整理', 409)
+                day = datetime.now(TZ).date().isoformat()
+                people = [json.loads(r[0]) for r in db.execute('SELECT data FROM employees')]
+                baseline = sum(1 for e in people if e.get('department') == dept and (not e.get('arrivalDate') or e['arrivalDate'] <= day) and (not e.get('departureDate') or e['departureDate'] >= day))
+                data = {'baseline': baseline, 'required': int(amount), 'created': at, 'history': [{'at': at, 'additional': int(amount), 'notes': note}]}
+                db.execute('INSERT INTO recruitment_goals VALUES(?,?,1)', (dept, compact(data)))
+            self.audit(db, actor, '增加徵人需求', dept, str(int(amount)))
+        return {'department': dept}
+
+    def leave_payload(self, body):
+        rows = body.get('records')
+        if not isinstance(rows, list) or not rows or len(rows) > 10000:
+            raise Problem('特休來源必須有1～10000列')
+        prepared = []
+        for r in rows:
+            if not isinstance(r, dict) or not r.get('name') or not r.get('sourceSheet'):
+                raise Problem('特休來源格式錯誤')
+            # Keep a bounded, explicit schema. Imported snapshots never create grants.
+            p = {k: clean(r.get(k), 4000 if k in ['usedRaw', 'daysRaw'] else 250) for k in ['name', 'arrivalRaw', 'daysRaw', 'usedRaw', 'sourceFile', 'sourceSheet']}
+            p['arrivalDate'] = valid_date(r.get('arrivalDate'))
+            p['sourceRow'] = int(number(r.get('sourceRow'), 1, 1000000))
+            for k in ['days', 'usedDays']:
+                p[k] = None if r.get(k) is None else number(r[k], 0, 10000)
+            p['cells'] = [{'label': clean(c.get('label'), 100), 'value': clean(c.get('value'), 4000)} for c in r.get('cells', [])[:50]]
+            p['settlements'] = [{'label': clean(c.get('label'), 100), 'date': valid_date(c.get('date')), 'raw': clean(c.get('raw'), 250)} for c in r.get('settlements', [])[:10]]
+            p['warnings'] = [clean(w, 250) for w in r.get('warnings', [])[:30]]
+            prepared.append(p)
+        return prepared
+
+    @staticmethod
+    def leave_row_key(row):
+        return hashlib.sha256(compact({k: v for k, v in row.items() if k != 'sourceFile'}).encode()).hexdigest()
+
+    def preview_leave(self, body):
+        rows = self.leave_payload(body)
+        with self.db() as db:
+            people = [self.employee(db, r[0]) for r in db.execute('SELECT id FROM employees').fetchall()]
+            old = {r[0] for r in db.execute('SELECT id FROM leave_import_rows')}
+        arrivals = {}
+        for row in rows:
+            if row['arrivalDate']:
+                arrivals.setdefault(row['name'], set()).add(row['arrivalDate'])
+        for row in rows:
+            matches = [e for e in people if e['name'] == row['name']]
+            row['employeeId'] = matches[0]['id'] if len(matches) == 1 else ''
+            warnings = list(row['warnings'])
+            if len(matches) != 1:
+                warnings.append('找不到唯一員工，請手動配對' if len(matches) != 1 else '')
+            elif row['arrivalDate'] and matches[0].get('arrivalDate') and matches[0]['arrivalDate'] != row['arrivalDate']:
+                warnings.append('與員工檔案到職日不同，未覆蓋')
+            if len(arrivals.get(row['name'], [])) > 1:
+                warnings.append('原Excel各分頁到職日不一致，需核對')
+            row['reviewWarnings'] = warnings
+            row['repeated'] = self.leave_row_key({k: v for k, v in row.items() if k not in ['employeeId', 'reviewWarnings']}) in old
+        return {'payload': body, 'rows': rows}
+
+    def import_leave(self, body, actor):
+        rows = self.leave_payload(body)
+        added = skipped = 0
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            for row in rows:
+                matches = list(db.execute("SELECT id FROM employees WHERE json_extract(data,'$.name')=?", (row['name'],)))
+                eid = matches[0][0] if len(matches) == 1 else None
+                key = self.leave_row_key(row)
+                if db.execute('SELECT 1 FROM leave_import_rows WHERE id=?', (key,)).fetchone():
+                    skipped += 1
+                    continue
+                db.execute('INSERT INTO leave_import_rows VALUES(?,?,?,?)', (key, eid, compact(row), now()))
+                added += 1
+            self.audit(db, actor, '匯入特休Excel歷史', '', str(added))
+        return {'added': added, 'skipped': skipped}
+
+    def bind_leave(self, body, actor):
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            eid = ident(body.get('employeeId'))
+            self.employee(db, eid)
+            cursor = db.execute('UPDATE leave_import_rows SET employee_id=? WHERE id=?', (eid, clean(body.get('id'), 64)))
+            if not cursor.rowcount:
+                raise Problem('找不到特休來源紀錄', 404)
+            self.audit(db, actor, '配對特休Excel員工', eid, body.get('id', ''))
+        return {'employeeId': eid}
 
     def upload_document(self, body, stream, length, roots, actor):
         employee_id, category = ident(body.get('employeeId')), body.get('category')
@@ -389,6 +506,9 @@ class Store:
             data = {k: '' for k in EMP_FIELDS}
             for k in ['name', 'phone', 'department', 'job']:
                 data[k] = candidate[k]
+            data['department'] = clean(body.get('department', data['department']), 200)
+            if not data['department']:
+                raise Problem('請先選擇實際報到部門，才能計入該組徵人進度')
             data.update(arrivalDate=arrival, employmentType=employment_type, notes='由徵人資料轉入；招募歷程保留於徵人分頁。')
             db.execute('INSERT INTO employees VALUES(?,?,1)', (employee_id, compact(data)))
             saved = {k: v for k, v in candidate.items() if k not in ['id', 'revision', 'created', 'updated']}
@@ -777,6 +897,23 @@ class App:
                 mime = {'/': 'text/html', '/app.js': 'text/javascript', '/styles.css': 'text/css'}[path]
                 return self.response(start_response, (HERE / 'public' / name).read_bytes(), mime=mime + '; charset=utf-8')
             if method == 'POST':
+                if path == '/api/leave/excel-preview':
+                    from leave_excel import read_excel
+                    params = {k: v[0] for k, v in parse_qs(env.get('QUERY_STRING', '')).items()}
+                    try:
+                        length = int(env.get('CONTENT_LENGTH') or 0)
+                    except ValueError:
+                        raise Problem('Excel大小無效')
+                    if not 0 < length <= 20 * 1024 * 1024:
+                        raise Problem('Excel上限20MB', 413)
+                    raw = env['wsgi.input'].read(length)
+                    if len(raw) != length:
+                        raise Problem('Excel上傳未完成')
+                    try:
+                        parsed = read_excel(raw, clean(params.get('filename'), 250))
+                    except Exception:
+                        raise Problem('無法讀取特休Excel，請確認有姓名、到職日欄位，且檔案未加密') from None
+                    return self.response(start_response, self.store.preview_leave(parsed))
                 if path == '/api/recruitment/excel-preview':
                     from recruitment_excel import read_excel
                     params = {k: v[0] for k, v in parse_qs(env.get('QUERY_STRING', '')).items()}
@@ -819,6 +956,9 @@ class App:
                     '/api/recruitment/convert': lambda: self.store.convert_candidate(body, actor),
                     '/api/recruitment/import-preview': lambda: self.store.preview_recruitment(body),
                     '/api/recruitment/import': lambda: self.store.import_recruitment(body, actor),
+                    '/api/recruitment/goal': lambda: self.store.add_goal(body, actor),
+                    '/api/leave/import': lambda: self.store.import_leave(body, actor),
+                    '/api/leave/bind': lambda: self.store.bind_leave(body, actor),
                     '/api/import': lambda: self.store.import_payload(body, actor),
                     '/api/sync': lambda: self.store.import_payload(fetch_source(self.source_url, self.source_secret), actor),
                 }

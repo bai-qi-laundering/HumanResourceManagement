@@ -8,6 +8,7 @@ const pages = {overview:'待辦總覽',employees:'員工檔案',insurance:'保�
 let candidateId=null;
 let recruitFilters={query:'',department:'',status:'',date:today(),scope:'all',dateMode:'exact'};
 let recruitPage=1,recruitEventPage=1;
+let leaveSheet='',leaveQuery='';
 const recruitStatuses=['待聯絡','待面試','待回覆','錄取','待報到','已報到','未錄取','放棄'];
 const localMinute=()=>today()+'T'+new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Taipei',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date());
 const candidate=id=>(state.candidates||[]).find(c=>c.id===id);
@@ -31,7 +32,7 @@ async function action(path, body, success){
 function heading(title,subtitle='',buttons=''){return `<div class="page-head"><div><h1>${esc(title)}</h1><p class="muted">${esc(subtitle)}</p></div><div class="actions">${buttons}</div></div>`;}
 const empty = (title,detail='') => `<div class="empty"><strong>${esc(title)}</strong>${esc(detail)}</div>`;
 const badge = (text,warn=false) => `<span class="badge${warn?' warn':''}">${esc(text)}</span>`;
-function table(headers,rows){return rows.length?`<div class="table-wrap"><table><thead><tr>${headers.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table></div>`:empty('尚無紀錄','新增或從打卡試算表匯入後顯示');}
+function table(headers,rows){return rows.length?`<div class="table-wrap"><table><thead><tr>${headers.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table></div>`:empty('尚無紀錄','請使用本頁的新增或匯入功能建立紀錄');}
 function who(id){return `<button class="employee-link" data-employee="${esc(id)}">${esc(employeeName(id))}</button><div class="muted">${esc(id)}</div>`;}
 const button = (text,form,emp='') => `<button data-form="${form}" data-id="${esc(emp)}">${esc(text)}</button>`;
 function overview(){
@@ -55,6 +56,7 @@ function employeeTable(query='',filter='all'){
 }
 function recordTable(kind,id){
   const records=state.records.filter(r=>r.kind===kind&&(!id||r.employeeId===id));
+  if(kind==='leave'&&!records.length)return empty('尚無人工特休紀錄','可新增核給、已休、調整或結清；Excel歷史資料另列於下方，不會自動加入可休餘額');
   if(kind==='insurance')return table(['員工','實際生效日','種類／異動','級距金額','確認','備註'],records.map(r=>`<tr><td>${who(r.employeeId)}</td><td>${esc(r.date)}</td><td>${esc(r.type)}・${esc(r.action)}</td><td>${money(r.amount)}</td><td>${badge(r.verified?'已確認':'待確認',!r.verified)}</td><td>${esc(r.notes)}</td></tr>`));
   if(kind==='leave')return table(['員工','日期','特休期間','異動','時數','備註'],records.map(r=>`<tr><td>${who(r.employeeId)}</td><td>${esc(r.date)}</td><td>${esc(r.period)}</td><td>${esc(r.action)}</td><td>${r.action==='已休'||r.action==='結清'?'−':r.hours>=0?'+':''}${esc(r.hours)} H</td><td>${esc(r.notes)}</td></tr>`));
   return table(['生效日','異動項目','說明'],records.map(r=>`<tr><td>${esc(r.date)}</td><td>${esc(r.type)}</td><td>${esc(r.notes)}</td></tr>`));
@@ -82,7 +84,7 @@ function employeeView(){
   }else{
     const title=tab==='insurance'?'勞保、健保與勞退異動':tab==='leave'?'特休時數帳本':'人事異動歷史';
     const leaveRecords=state.records.filter(r=>r.employeeId===e.id&&r.kind==='leave');const balance=leaveRecords.reduce((n,r)=>n+r.hours*(r.action==='已休'||r.action==='結清'?-1:1),0);
-    body=`<section class="panel"><div class="page-head"><h2>${title}</h2>${button('新增紀錄',tab,e.id)}</div>${tab==='leave'?`<div class="notice">各期合計餘額 ${Math.round(balance*100)/100} 小時。核給、已休及結清分期記錄；本版不自動給假，也不回寫薪資扣款。</div>`:''}${recordTable(tab,e.id)}</section>`;
+    body=`<section class="panel"><div class="page-head"><h2>${title}</h2>${button('新增紀錄',tab,e.id)}</div>${tab==='leave'?`<div class="notice">各期合計餘額 ${Math.round(balance*100)/100} 小時。核給、已休及結清分期記錄；本版不自動給假，也不回寫薪資扣款。</div>`:''}${recordTable(tab,e.id)}</section>${tab==='leave'?'<section class="panel"><h2>原Excel特休紀錄</h2>'+leaveExcelTable(e.id)+'</section>':''}`;
   }
   return `<button class="quiet back" data-page="employees">← 員工名單</button><div class="person"><div class="avatar">${esc(e.name.slice(0,1))}</div><div><h1>${esc(e.name)} <span class="muted">${esc(e.id)}</span></h1><div class="muted">${esc(e.department)}・${esc(e.employmentType)}・${active(e)?'在職':'離職／尚未到職'}</div></div></div><div class="tabs" role="tablist" aria-label="員工資料">${Object.entries(tabs).map(([k,v])=>`<button role="tab" aria-selected="${tab===k}" class="${tab===k?'active':''}" data-tab="${k}">${v}</button>`).join('')}</div>${body}`;
 }
@@ -94,7 +96,7 @@ function settings(){
 }
 function render(){
   $('navigation').innerHTML=Object.entries(pages).map(([k,v])=>`<button class="${page===k?'active':''}" data-page="${k}" aria-current="${page===k?'page':'false'}">${v}</button>`).join('');
-  const renderers={overview,employees,documents,settings,recruitment,insurance:()=>heading('保險異動','實際加退保日期及投保級距分開記錄',button('新增保險紀錄','insurance'))+`<section class="panel">${recordTable('insurance')}</section>`,salary:()=>heading('薪資歷史','保留每次匯入版本；核定及付款只變更狀態，不改金額',button('登錄薪資','salary'))+`<section class="panel">${salaryTable()}</section>`,leave:()=>heading('特休紀錄','以時數及各期帳本記錄，不與月休8天混用',button('新增特休紀錄','leave'))+`<section class="panel">${recordTable('leave')}</section>`};
+  const renderers={overview,employees,documents,settings,recruitment,leave:leavePage,insurance:()=>heading('保險異動','實際加退保日期及投保級距分開記錄',button('新增保險紀錄','insurance'))+`<section class="panel">${recordTable('insurance')}</section>`,salary:()=>heading('薪資歷史','保留每次匯入版本；核定及付款只變更狀態，不改金額',button('登錄薪資','salary'))+`<section class="panel">${salaryTable()}</section>`};
   $('content').innerHTML=page==='employees'&&employeeId?employeeView():renderers[page]();
 }
 function recruitOpen(c){return !['已報到','未錄取','放棄'].includes(c.status);}
@@ -143,7 +145,38 @@ function recruitment(){
   }
   const people=state.candidates||[],open=people.filter(recruitOpen),departments=[...new Set(people.map(c=>c.department).filter(Boolean))].sort();
   const counts=[['due','今日待聯絡',open.filter(c=>c.followupDate&&c.followupDate<=today()).length],['interview','今日面試',open.filter(c=>c.interviewAt?.slice(0,10)===today()).length],['overdue','逾期追蹤',open.filter(c=>c.followupDate&&c.followupDate<today()).length],['onboard','待報到',people.filter(c=>c.status==='待報到').length]];
-  return heading('徵人',today()+'｜電話聯絡、面試及報到進度',button('新增應徵者','candidate'))+`<section class="panel"><h2>匯入Excel應徵資料</h2><div class="toolbar"><label>匯入開始日<input id="recruit-import-start" type="date" value="2026-07-01"></label><label>匯入截止日<input id="recruit-import-end" type="date" value="${today()}"></label><button data-recruit-import>選擇Excel／整理檔</button><input id="recruit-import-file" type="file" accept=".xlsx,.xls,.json" hidden></div><p class="muted">先預覽再匯入；依姓名＋電話合併人員，已匯入的相同來源列不重複新增。原分頁跨多日時保留日期範圍。</p></section>`+`<div class="stats">${counts.map(([k,t,n])=>`<button class="stat recruit-stat ${recruitFilters.scope===k?'selected':''}" data-recruit-scope="${k}"><span>${t}</span><strong>${n}</strong></button>`).join('')}</div><div class="toolbar"><input id="recruit-search" aria-label="搜尋應徵者" placeholder="搜尋姓名、電話或職缺" value="${esc(recruitFilters.query)}"><select id="recruit-department" aria-label="招募部門"><option value="">全部部門</option>${departments.map(d=>`<option ${d===recruitFilters.department?'selected':''}>${esc(d)}</option>`).join('')}</select><select id="recruit-status" aria-label="招募進度"><option value="">全部進度</option>${recruitStatuses.map(d=>`<option ${d===recruitFilters.status?'selected':''}>${esc(d)}</option>`).join('')}</select><button class="quiet" data-recruit-scope="all">全部人員</button></div><section class="panel"><h2>應徵者名單</h2><div id="candidate-list">${candidateList()}</div></section><section class="panel"><div class="page-head"><h2>每日電話與面試紀錄</h2><select id="recruit-date-mode" aria-label="歷史日期篩選"><option value="exact" ${recruitFilters.dateMode==='exact'?'selected':''}>有明確日期</option><option value="unknown" ${recruitFilters.dateMode==='unknown'?'selected':''}>日期未明（全部原分頁）</option></select><label>紀錄日期<input id="recruit-date" type="date" value="${esc(recruitFilters.date)}"></label></div><div id="recruit-events">${recruitEvents()}</div></section>`;
+  return heading('徵人',today()+'｜電話聯絡、面試及報到進度',button('新增應徵者','candidate'))+hiringGoals()+`<section class="panel"><h2>匯入Excel應徵資料</h2><div class="toolbar"><label>匯入開始日<input id="recruit-import-start" type="date" value="2026-07-01"></label><label>匯入截止日<input id="recruit-import-end" type="date" value="${today()}"></label><button data-recruit-import>選擇Excel／整理檔</button><input id="recruit-import-file" type="file" accept=".xlsx,.xls,.json" hidden></div><p class="muted">先預覽再匯入；依姓名＋電話合併人員，已匯入的相同來源列不重複新增。原分頁跨多日時保留日期範圍。</p></section>`+`<div class="stats">${counts.map(([k,t,n])=>`<button class="stat recruit-stat ${recruitFilters.scope===k?'selected':''}" data-recruit-scope="${k}"><span>${t}</span><strong>${n}</strong></button>`).join('')}</div><div class="toolbar"><input id="recruit-search" aria-label="搜尋應徵者" placeholder="搜尋姓名、電話或職缺" value="${esc(recruitFilters.query)}"><select id="recruit-department" aria-label="招募部門"><option value="">全部部門</option>${departments.map(d=>`<option ${d===recruitFilters.department?'selected':''}>${esc(d)}</option>`).join('')}</select><select id="recruit-status" aria-label="招募進度"><option value="">全部進度</option>${recruitStatuses.map(d=>`<option ${d===recruitFilters.status?'selected':''}>${esc(d)}</option>`).join('')}</select><button class="quiet" data-recruit-scope="all">全部人員</button></div><section class="panel"><h2>應徵者名單</h2><div id="candidate-list">${candidateList()}</div></section><section class="panel"><div class="page-head"><h2>每日電話與面試紀錄</h2><select id="recruit-date-mode" aria-label="歷史日期篩選"><option value="exact" ${recruitFilters.dateMode==='exact'?'selected':''}>有明確日期</option><option value="unknown" ${recruitFilters.dateMode==='unknown'?'selected':''}>日期未明（全部原分頁）</option></select><label>紀錄日期<input id="recruit-date" type="date" value="${esc(recruitFilters.date)}"></label></div><div id="recruit-events">${recruitEvents()}</div></section>`;
+}
+function hiringGoals(){
+  const goals=state.recruitmentGoals||[];
+  return `<section class="panel"><div class="page-head"><h2>各組徵人需求與完成進度</h2>${button('新增部門需求','goal')}</div><p class="muted">以建立需求時的在職人數為基準；報到增加、離職減少淨補足人數。離職日當天仍在職，隔日起扣除。待報到及僅標記「已報到」的應徵者不計入，須建立員工檔案。</p><div class="toolbar"><button class="quiet" id="goal-refresh">更新進度</button><button data-sync ${state.settings.gasConfigured?'':'disabled'}>同步打卡員工異動</button><span class="muted">${state.lastImport?'上次來源同步：'+esc(state.lastImport.at||state.lastImport.time||'請見連線與匯入'):'尚未同步打卡來源'}</span></div>${goals.length?`<div class="goals-grid">${goals.map(g=>`<article class="goal-card"><div class="page-head"><h3>${esc(g.department)}</h3>${button('增加需求','goal',g.department)}</div><div class="goal-number">${esc(g.filled)} / ${esc(g.required)} <small>人 · ${esc(g.percent)}%</small></div><progress value="${esc(g.percent)}" max="100" aria-label="${esc(g.department)}徵人完成度">${esc(g.percent)}%</progress><p>還需 ${esc(g.remaining)} 人 ${g.remaining===0?badge('已達標'):''}</p><p class="muted">基準 ${esc(g.baseline)} 人 → 目前在職 ${esc(g.current)} 人<br>淨補足 ${esc(g.netFilled)} 人 · 統計日 ${esc(g.asOf)}</p><details><summary>需求異動紀錄</summary>${g.history.map(h=>`<p class="record-notes">${esc(h.at.replace('T',' ').slice(0,16))}　增加 ${esc(h.additional)} 人<br>${esc(h.notes||'—')}</p>`).join('')}</details></article>`).join('')}</div>`:empty('尚未設定各組需求','先確認員工名單及離職日，再新增需要補足的人數')}</section>`;
+}
+function leaveExcelTable(id){
+  const all=state.leaveExcel||[];
+  const rows=all.filter(r=>(id?r.employeeId===id:!leaveSheet||r.sourceSheet===leaveSheet)&&(!leaveQuery||(r.name+' '+(r.employeeId||'')).includes(leaveQuery)));
+  if(!rows.length)return empty('尚無符合的Excel特休紀錄','請在特休頁上傳「特休結算.xls」，或切換原分頁；不從打卡試算表取得特休');
+  return table(['員工／來源','到職日','原表天數／已休','結算日期','核對／原始內容'],rows.map(r=>{
+    const e=employee(r.employeeId),warnings=[...(r.warnings||[])];
+    if(!e)warnings.push('尚未配對員工');
+    if(e?.arrivalDate&&r.arrivalDate&&e.arrivalDate!==r.arrivalDate)warnings.push('與員工檔案到職日不同，未覆蓋');
+    const dates=new Set(all.filter(a=>a.name===r.name&&a.arrivalDate).map(a=>a.arrivalDate));if(dates.size>1)warnings.push('各分頁到職日不一致');
+    return `<tr><td>${e?who(e.id):esc(r.name)}<div class="muted">${esc(r.sourceFile)} · ${esc(r.sourceSheet)} · 第 ${esc(r.sourceRow)} 列</div>${button('配對員工','leave-bind',r.id)}</td><td>${esc(r.arrivalDate||r.arrivalRaw||'未填')}</td><td>天數：${esc(r.daysRaw||'未填')}<br>已休：${esc(r.usedRaw||'未填')}<div class="muted">原表歷史值，非目前餘額</div></td><td>${r.settlements.map(s=>esc(s.label)+'：'+esc(s.date||s.raw||'未填')).join('<br>')}</td><td>${warnings.map(w=>badge(w,true)).join(' ')}<details><summary>查看原Excel內容</summary>${r.cells.map(c=>`<p class="record-notes"><b>${esc(c.label)}</b>：${esc(c.value)}</p>`).join('')}</details></td></tr>`;
+  }));
+}
+function leavePage(){
+  const sheets=[...new Set((state.leaveExcel||[]).map(r=>r.sourceSheet))].sort((a,b)=>b.localeCompare(a,undefined,{numeric:true}));
+  // Prefer the plain latest year (115), rather than an older date tab (11204).
+  if(!leaveSheet&&sheets.length)leaveSheet=sheets.filter(s=>/^\d{3}$/.test(s)).sort((a,b)=>Number(b)-Number(a))[0]||sheets[0];
+  return heading('特休紀錄','特休Excel與人工時數帳本分開呈現',button('新增特休紀錄','leave'))+`<section class="panel"><div class="page-head"><h2>原Excel特休紀錄</h2><button data-leave-import>匯入特休Excel</button><input id="leave-import-file" type="file" accept=".xlsx,.xls" hidden></div><p class="notice">顯示到職日、原表天數、已休、結算日期及備註。空白不當作0；保留各年度及已結清說明，不會自動核給特休或覆蓋員工到職日。核對後可在下方登錄正確期間的時數。</p><div class="toolbar"><label>原Excel分頁<select id="leave-sheet">${sheets.map(s=>`<option ${s===leaveSheet?'selected':''}>${esc(s)}</option>`).join('')}</select></label><input id="leave-search" aria-label="搜尋特休員工" placeholder="搜尋姓名或員工編號" value="${esc(leaveQuery)}"></div><div id="leave-excel-list">${leaveExcelTable()}</div></section><section class="panel"><h2>人工特休時數帳本</h2>${recordTable('leave')}</section>`;
+}
+async function previewLeaveFile(file){
+  if(!file||busy)return;busy=true;document.querySelectorAll('button').forEach(b=>b.disabled=true);
+  try{
+    if(file.size>20*1024*1024)throw Error('特休Excel上限20MB');
+    const response=await fetch('/api/leave/excel-preview?'+new URLSearchParams({filename:file.name}),{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/octet-stream','X-HR-CSRF':csrf},body:file});
+    const result=await response.json();if(!response.ok)throw Error(result.error||'特休Excel讀取失敗');
+    openForm('leave-import','',result);
+  }catch(e){notify(e.message,true);}finally{busy=false;document.querySelectorAll('button').forEach(b=>b.disabled=false);}
 }
 function refreshRecruitLists(){if($('candidate-list'))$('candidate-list').innerHTML=candidateList();if($('recruit-events'))$('recruit-events').innerHTML=recruitEvents();}
 async function prepareDocument(file){
@@ -176,8 +209,21 @@ function field(label,name,value='',type='text',required=false,wide=false){return
 function select(label,name,options,value=''){return `<label>${esc(label)}<select name="${name}" required>${options.map(v=>`<option value="${esc(v)}" ${v===value?'selected':''}>${esc(v)}</option>`).join('')}</select></label>`;}
 function openForm(kind,id='',extra=null){
   currentForm={kind,id,extra};$('form-error').textContent='';let fields='';
-  $('save-form').textContent=kind==='recruit-import'?'確認匯入':'儲存';
-  if(kind==='recruit-import'){
+  $('save-form').textContent=['recruit-import','leave-import'].includes(kind)?'確認匯入':'儲存';
+  if(kind==='goal'){
+    const goals=state.recruitmentGoals||[],goal=goals.find(g=>g.department===id);
+    currentForm.goalRevisions=Object.fromEntries(goals.map(g=>[g.department,g.revision]));
+    const depts=[...new Set([...state.employees.map(e=>e.department),...goals.map(g=>g.department)].filter(Boolean))].sort();
+    $('dialog-title').textContent=goal?'增加'+id+'徵人需求':'新增部門徵人需求';
+    fields=`<p class="wide notice">${goal?'目前需求 '+goal.required+' 人、淨補足 '+goal.netFilled+' 人。增加需求會保留原基準及完成進度。':'請先確認員工名單及離職日已同步。首次建立時以目前在職人數作為基準，之後報到、離職會更新淨補足人數。'}</p>`+(goal?field('部門','department',id,'text',true):select('部門（依員工檔案）','department',depts))+field('本次增加需求人數','additional',1,'number',true)+field('提出原因／備註','notes','','textarea',false,true);
+  }else if(kind==='leave-bind'){
+    const row=(state.leaveExcel||[]).find(r=>r.id===id);$('dialog-title').textContent='特休Excel配對員工';
+    fields=`<p class="wide notice">${esc(row.name)} · ${esc(row.sourceSheet)} · 第 ${esc(row.sourceRow)} 列<br>只變更這筆來源紀錄的配對，不覆蓋員工到職日或核給時數。</p><label class="wide">員工<select name="employeeId" required>${employeeOptions(row.employeeId||'')}</select></label>`;
+  }else if(kind==='leave-import'){
+    $('dialog-title').textContent='確認匯入特休Excel';currentForm.payload=extra.payload;
+    const rows=extra.rows,matched=rows.filter(r=>r.employeeId).length;
+    fields=`<div class="wide notice">來源共 ${rows.length} 列，唯一姓名配對 ${matched} 列，待配對 ${rows.length-matched} 列；重複來源 ${rows.filter(r=>r.repeated).length} 列會略過。<br>匯入原始歷史資料，不自動核給或覆蓋到職日。各年度、空白及結清備註均保留。</div><div class="wide">${table(['姓名／分頁','到職日','天數／已休','核對提示'],rows.map(r=>`<tr><td>${esc(r.name)}<br>${esc(r.sourceSheet)} · ${esc(r.sourceRow)}</td><td>${esc(r.arrivalDate||r.arrivalRaw)}</td><td>${esc(r.daysRaw||'未填')} / ${esc(r.usedRaw||'未填')}</td><td>${r.reviewWarnings.map(esc).join('<br>')||'—'}</td></tr>`))}</div>`;
+  }else if(kind==='recruit-import'){
     $('dialog-title').textContent='確認匯入徵人資料';currentForm.payload=extra.payload;
     const m=extra.summary;fields=`<div class="wide notice">${esc(extra.payload.startDate)}～${esc(extra.payload.endDate)}<br>來源 ${m.rows} 列／依姓名電話合併 ${m.people} 人<br>待新增 ${m.newRows} 列／相同來源略過 ${m.repeatedRows} 列<br>${(extra.warnings||[]).map(esc).join('<br>')}</div><div class="wide">${table(['姓名','電話','原分頁'],extra.payload.records.slice(0,20).map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.phone)}</td><td>${esc(r.sourceSheet)}</td></tr>`))}<p class="muted">預覽前20列；按確認後匯入全部範圍內資料。既有人工編輯資料保留。</p></div>`;
   }else if(kind==='upload'){
@@ -191,7 +237,8 @@ function openForm(kind,id='',extra=null){
     fields=field('實際日期時間','at',localMinute(),'datetime-local',true)+field(phone?'聯絡人':'面試主管','contactPerson',c.contactPerson,'text',true)+select('結果','outcome',phone?['已接通','未接','忙線','停話／錯號','婉拒','約定面試','待回覆']:['已面試','未到場','改期','錄取','未錄取','待回覆'])+select('更新招募進度','status',recruitStatuses,c.status)+field('下次追蹤日（空白表示無待追蹤）','nextFollowup',c.followupDate,'date')+field('下次預約面試時間','nextInterviewAt',phone?c.interviewAt:'','datetime-local')+field(phone?'談話摘要':'面試內容／評語','notes','','textarea',false,true);
   }else if(kind==='recruit-convert'){
     const c=candidate(id);$('dialog-title').textContent=c.name+'｜報到並轉為員工';
-    fields='<p class="wide notice">建立NAS人資員工檔案並保留招募歷程；不會新增LINE綁定或回寫打卡試算表。打卡系統仍需用相同員工編號建檔。</p>'+field('員工編號','employeeId','','text',true)+field('實際到職日','arrivalDate',c.availableDate||today(),'date',true)+select('聘僱型態','employmentType',['正職','時薪','兼職']);
+    const depts=[...new Set([...state.employees.map(e=>e.department),...(state.recruitmentGoals||[]).map(g=>g.department),c.department].filter(Boolean))].sort();
+    fields='<p class="wide notice">建立NAS人資員工檔案並保留招募歷程；到職日起依實際部門計入徵人進度。打卡系統仍需用相同員工編號建檔。</p>'+field('員工編號','employeeId','','text',true)+select('實際報到部門','department',['',...depts],c.department)+field('實際到職日','arrivalDate',c.availableDate||today(),'date',true)+select('聘僱型態','employmentType',['正職','時薪','兼職']);
   }else if(kind==='employee'){
     const e=id?employee(id):{};$('dialog-title').textContent=id?'編輯員工檔案':'新增員工';
     fields=field('員工編號','id',e.id||'','text',true)+field('姓名','name',e.name||'','text',true)+field('部門','department',e.department)+field('職務','job',e.job)+select('聘僱型態','employmentType',['正職','時薪','兼職'],e.employmentType)+field('到職日','arrivalDate',e.arrivalDate,'date')+field('離職日','departureDate',e.departureDate,'date')+field('電話','phone',e.phone)+field('緊急聯絡人／電話','emergencyContact',e.emergencyContact)+field('紙本原件位置','paperLocation',e.paperLocation)+field('備註','notes',e.notes,'textarea',false,true);
@@ -213,6 +260,7 @@ function openForm(kind,id='',extra=null){
   $('form-fields').innerHTML=`<div class="form-grid">${fields}</div>`;
   $('form-fields').querySelectorAll('input[type="number"]').forEach(e=>e.step='any');
   if(kind==='employee'&&id)$('form-fields').querySelector('[name=id]').readOnly=true;
+  if(kind==='goal'&&id)$('form-fields').querySelector('[name=department]').readOnly=true;
   $('form-dialog').showModal();
 }
 document.addEventListener('click',async event=>{
@@ -225,6 +273,7 @@ document.addEventListener('click',async event=>{
     else if(b.dataset.recruitScope){recruitFilters.scope=b.dataset.recruitScope;recruitPage=1;recruitEventPage=1;render();}
     else if(b.dataset.recruitPager){if(b.dataset.recruitPager==='people')recruitPage+=Number(b.dataset.direction);else recruitEventPage+=Number(b.dataset.direction);refreshRecruitLists();}
     else if(b.hasAttribute('data-recruit-import'))$('recruit-import-file').click();
+    else if(b.hasAttribute('data-leave-import'))$('leave-import-file').click();
     else if(b.dataset.upload)openForm('upload',b.dataset.id,b.dataset.upload);
     else if(b.dataset.employee){page='employees';employeeId=b.dataset.employee;tab='basic';render();}
     else if(b.dataset.tab){tab=b.dataset.tab;render();}
@@ -240,14 +289,16 @@ document.addEventListener('click',async event=>{
       if(view.tagName==='IFRAME')view.title='文件預覽';else view.alt=doc.filename;
       $('preview-content').append(view);$('preview-dialog').showModal();
     }
-    else if(b.id==='refresh'){await load();notify('資料已重新載入。');}
+    else if(b.id==='refresh'||b.id==='goal-refresh'){await load();notify('資料與徵人進度已更新。');}
     else if(b.id==='import-button')$('import-file').click();
   }catch{/* Action already displays errors. */}
 });
-document.addEventListener('input',event=>{if(event.target.id==='recruit-search'){recruitFilters.query=event.target.value;recruitPage=1;recruitEventPage=1;refreshRecruitLists();}if(event.target.id==='employee-search')$('employee-table').innerHTML=employeeTable(event.target.value,$('employee-filter').value);});
+document.addEventListener('input',event=>{if(event.target.id==='leave-search'){leaveQuery=event.target.value;$('leave-excel-list').innerHTML=leaveExcelTable();}if(event.target.id==='recruit-search'){recruitFilters.query=event.target.value;recruitPage=1;recruitEventPage=1;refreshRecruitLists();}if(event.target.id==='employee-search')$('employee-table').innerHTML=employeeTable(event.target.value,$('employee-filter').value);});
 document.addEventListener('change',async event=>{
   const recruitKeys={'recruit-department':'department','recruit-status':'status','recruit-date':'date','recruit-date-mode':'dateMode'};if(recruitKeys[event.target.id]){recruitFilters[recruitKeys[event.target.id]]=event.target.value;recruitPage=1;recruitEventPage=1;refreshRecruitLists();}
   if(event.target.id==='recruit-import-file'){const file=event.target.files[0];try{await previewRecruitmentFile(file);}finally{event.target.value='';}}
+  if(event.target.id==='leave-import-file'){const file=event.target.files[0];try{await previewLeaveFile(file);}finally{event.target.value='';}}
+  if(event.target.id==='leave-sheet'){leaveSheet=event.target.value;$('leave-excel-list').innerHTML=leaveExcelTable();}
   if(['document-file','document-camera'].includes(event.target.id)){currentForm.file=event.target.files[0];$('upload-selection').textContent=currentForm.file?'已選擇：'+currentForm.file.name:'尚未選擇檔案';}
 
   if(event.target.id==='employee-filter')$('employee-table').innerHTML=employeeTable($('employee-search').value,event.target.value);
@@ -260,9 +311,12 @@ document.addEventListener('change',async event=>{
 $('edit-form').addEventListener('submit',async event=>{
   event.preventDefault();if(busy)return;const body=Object.fromEntries(new FormData(event.target));
   const form=currentForm;let endpoint;
+  if(form.kind==='leave-import'){try{const r=await action('/api/leave/import',form.payload,'特休Excel歷史紀錄已存入NAS。');notify('特休匯入完成：新增 '+r.added+' 列，相同來源略過 '+r.skipped+' 列。請切換原分頁核對。');$('form-dialog').close();}catch(e){$('form-error').textContent=e.message;}return;}
   if(form.kind==='recruit-import'){try{const r=await action('/api/recruitment/import',form.payload,'徵人資料已匯入NAS。');notify('匯入完成：新增 '+r.counts.candidates+' 位應徵者、'+r.counts.events+' 筆聯絡紀錄；相同來源略過 '+r.counts.skipped+' 列。');$('form-dialog').close();}catch(e){$('form-error').textContent=e.message;}return;}
   if(form.kind==='upload'){try{await uploadDocument(body,form.file);$('form-dialog').close();}catch(e){$('form-error').textContent=e.message;}return;}
-  if(form.kind==='candidate'){endpoint='/api/recruitment/candidate';if(form.id){body.id=form.id;body.revision=form.revision;}}
+  if(form.kind==='goal'){endpoint='/api/recruitment/goal';body.additional=Number(body.additional);body.revision=form.goalRevisions[body.department]||0;}
+  else if(form.kind==='leave-bind'){endpoint='/api/leave/bind';body.id=form.id;}
+  else if(form.kind==='candidate'){endpoint='/api/recruitment/candidate';if(form.id){body.id=form.id;body.revision=form.revision;}}
   else if(form.kind.startsWith('recruit-')){const c=candidate(form.id);body.candidateId=c.id;body.revision=form.revision;endpoint=form.kind==='recruit-convert'?'/api/recruitment/convert':'/api/recruitment/event';if(form.kind!=='recruit-convert')body.kind=form.kind==='recruit-phone'?'phone':'interview';}
   else if(form.kind==='employee'){endpoint='/api/employee';const old=form.id?employee(form.id):null;if(old){body.revision=old.revision;body.lineBound=old.lineBound;}}
   else if(form.kind==='bind'){endpoint='/api/documents/bind';body.id=form.extra;}
@@ -276,8 +330,9 @@ $('close-preview').addEventListener('click',()=>{$('preview-dialog').close();$('
 $('preview-dialog').addEventListener('close',()=>$('preview-content').replaceChildren());
 load().catch(e=>{$('content').innerHTML=empty('無法連接人資系統','請確認已連公司網路，再按重新整理。');notify(e.message,true);});
 // A page left open after leaving the office must not continue displaying loaded HR data.
+let refreshTicks=0;
 setInterval(async()=>{
   if(!state||busy)return;
-  try{await request('/api/ping');}
+  try{await request('/api/ping');if(++refreshTicks%4===0&&page==='recruitment'&&!$('form-dialog').open&&!['INPUT','SELECT','TEXTAREA'].includes(document.activeElement?.tagName))await load();}
   catch(e){state=null;csrf='';$('form-dialog').close();$('preview-dialog').close();$('preview-content').replaceChildren();$('content').innerHTML=empty('公司網路連線中斷','已隱藏人事資料，回公司後請重新整理。');notify(e.message,true);}
 },15000);

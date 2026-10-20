@@ -36,6 +36,16 @@ vm.createContext(context);vm.runInContext(fs.readFileSync('public/app.js','utf8'
  await get('edit-form').listeners.submit({preventDefault(){},target:{}});assert.equal(sent.at(-1).path,'/api/recruitment/import');
  fixtures.recruitmentEvents.push({id:'unknown1',candidateId:'candidate1',kind:'phone',at:'',contactDate:'',rangeStart:'2026-07-02',rangeEnd:'2026-07-08',sourceSheet:'115年7月2日8日',sourceRow:2,rawCallTime:'10:00',imported:true,outcome:'原Excel紀錄',notes:'日期未填',created:'2026-10-20T10:00'});
  vm.runInContext("page='recruitment';candidateId=null;recruitFilters.dateMode='unknown';render();",context);assert(get('content').innerHTML.includes('日期未填'));assert(get('content').innerHTML.includes('原撥打時間'));
+ fixtures.recruitmentGoals=[{department:'洗滌',baseline:10,current:12,required:5,netFilled:2,filled:2,remaining:3,percent:40,revision:1,asOf:'2026-10-20',history:[{at:'2026-10-20T10:00',additional:5,notes:'現場補人'}]}];
+ vm.runInContext("page='recruitment';render();",context);assert(get('content').innerHTML.includes('40%'));assert(get('content').innerHTML.includes('還需 3 人'));
+ context.openForm('goal','洗滌');formEntries=[['department','洗滌'],['additional','2'],['notes','增加需求']];
+ await get('edit-form').listeners.submit({preventDefault(){},target:{}});assert.equal(sent.at(-1).path,'/api/recruitment/goal');assert.equal(JSON.parse(sent.at(-1).options.body).revision,1);
+ fixtures.leaveExcel=[{id:'leave1',employeeId:'TEST001',name:evil,arrivalDate:'2023-01-01',sourceFile:'特休.xls',sourceSheet:'115',sourceRow:2,daysRaw:'7+3',usedRaw:'',warnings:[],settlements:[],cells:[{label:'備註',value:evil}]}];
+ vm.runInContext("page='leave';render();",context);assert(!get('content').innerHTML.includes('從打卡試算表匯入後顯示'));assert(get('content').innerHTML.includes('7+3'));assert(get('content').innerHTML.includes('已休：未填'));assert(!get('content').innerHTML.includes('<img src=x'));
+ context.openForm('leave-bind','leave1');formEntries=[['employeeId','TEST001']];await get('edit-form').listeners.submit({preventDefault(){},target:{}});assert.equal(sent.at(-1).path,'/api/leave/bind');
+ const leavePayload={records:[{name:'測試',sourceSheet:'115',sourceRow:2}]};context.openForm('leave-import','',{payload:leavePayload,rows:[{name:'測試',sourceSheet:'115',sourceRow:2,reviewWarnings:['到職日需核對']}]});assert(get('form-fields').innerHTML.includes('到職日需核對'));
+ context.fetch=async(path,options)=>{if(options?.method==='POST')sent.push({path,options});return {ok:true,json:async()=>path==='/api/leave/import'?{added:1,skipped:0}:fixtures};};
+ await get('edit-form').listeners.submit({preventDefault(){},target:{}});assert.equal(sent.at(-1).path,'/api/leave/import');
  context.fetch=async()=>{throw Error('offline');};await heartbeat();assert(get('content').innerHTML.includes('公司網路連線中斷'));assert.equal(vm.runInContext('state',context),null);
  console.log('PASS: all application views, employee tabs/forms, escaped names, disconnect clears loaded data.');
 })().catch(e=>{console.error(e);process.exitCode=1;});
