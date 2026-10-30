@@ -23,9 +23,15 @@ async function request(path, body){
   if(!res.ok)throw Error(data.error||'操作失敗');return data;
 }
 async function load(){state=await request('/api/state');csrf=state.csrf;render();}
-async function action(path, body, success){
+async function action(path, body, success, onSaved=null){
   if(busy)return;busy=true;document.querySelectorAll('button').forEach(b=>b.disabled=true);
-  try{const result=await request(path,body);await load();notify(result.warnings?.length?success+'\n'+result.warnings.join('\n'):success);return result;}
+  try{
+    const result=await request(path,body);
+    if(onSaved)onSaved(result);
+    try{await load();}
+    catch(e){notify('資料已儲存於NAS，但畫面更新失敗。請重新整理確認，勿重複新增。\n'+e.message,true);return result;}
+    notify(result.warnings?.length?success+'\n'+result.warnings.join('\n'):success);return result;
+  }
   catch(e){notify(e.message,true);throw e;}
   finally{busy=false;document.querySelectorAll('button').forEach(b=>b.disabled=false);const sync=document.querySelector('[data-sync]');if(sync)sync.disabled=!state.settings.gasConfigured;}
 }
@@ -328,8 +334,18 @@ $('edit-form').addEventListener('submit',async event=>{
   else if(form.kind==='salary')endpoint='/api/salary';
   else{endpoint='/api/record';body.kind=form.kind;if(form.kind==='insurance')body.verified=body.verified==='已確認';}
   for(const key of ['amount','dependentCount','hours','netPay','workHours'])if(key in body)body[key]=Number(body[key]);
-  try{await action(endpoint,body,'資料已儲存於NAS。');$('form-dialog').close();}catch(e){$('form-error').textContent=e.message;}
+  try{await action(endpoint,body,'資料已儲存於NAS。',result=>{
+    // Open the saved person's history even when the list filters exclude them.
+    if(form.kind==='candidate')candidateId=result.id;
+    else if(form.kind==='recruit-phone'||form.kind==='recruit-interview')candidateId=form.id;
+  });$('form-dialog').close();}catch(e){$('form-error').textContent=e.message;$('form-error').scrollIntoView({block:'nearest'});}
 });
+// Native required/date validation can block submit before our handler runs.
+$('edit-form').addEventListener('invalid',event=>{
+  const label=event.target.closest('label');
+  const title=label?.firstChild?.textContent?.trim()||'必填欄位';
+  $('form-error').textContent='尚未儲存：請檢查「'+title+'」。'+event.target.validationMessage;
+},true);
 for(const id of ['close-dialog','cancel-dialog'])$(id).addEventListener('click',()=>$('form-dialog').close());
 $('close-preview').addEventListener('click',()=>{$('preview-dialog').close();$('preview-content').replaceChildren();});
 $('preview-dialog').addEventListener('close',()=>$('preview-content').replaceChildren());

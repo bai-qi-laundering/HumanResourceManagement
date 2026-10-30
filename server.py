@@ -916,7 +916,15 @@ class App:
             if method == 'GET' and path == '/api/ping':
                 return self.response(start_response, {'time': now()})
             if method == 'GET' and path == '/api/state':
-                csrf = secrets.token_hex(32)
+                # Tabs share cookies: rotating on every refresh invalidates forms
+                # still open in another tab. Reuse a valid same-origin token.
+                cookies = SimpleCookie()
+                try:
+                    cookies.load(env.get('HTTP_COOKIE', ''))
+                except Exception:
+                    cookies = SimpleCookie()
+                cookie = cookies.get('hr_csrf')
+                csrf = cookie.value if cookie and re.fullmatch(r'[a-f0-9]{64}', cookie.value) else secrets.token_hex(32)
                 access = {key: document_access(value) for key, value in self.roots.items()}
                 settings = {'documentRoots': {key: value['readable'] for key, value in access.items()}, 'documentAccess': access, 'uploadLimit': UPLOAD_LIMIT, 'gasConfigured': bool(self.source_url and len(self.source_secret) >= 32), 'networkMode': '公司內網限定'}
                 result = self.store.state(settings)

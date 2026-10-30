@@ -1,7 +1,7 @@
 /* Node VM interaction test; real browser visual QA is still required on NAS. */
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
 const fixtures={employees:[{id:'TEST001',name:'測試員工',department:'摺疊',employmentType:'正職',arrivalDate:'2024-01-01',revision:1}],records:[],salaries:[],documents:[],attendance:[],candidates:[{id:'candidate1',name:'應徵測試',phone:'0912345678',department:'洗滌',job:'洗滌人員',status:'待面試',followupDate:'2026-10-20',interviewAt:'2026-10-21T10:00',revision:1}],recruitmentEvents:[{id:'event1',candidateId:'candidate1',kind:'phone',at:'2026-10-20T09:00',contactPerson:'NANA',outcome:'約定面試',notes:'已確認面試',created:'2026-10-20T09:01'}],audit:[],settings:{documentRoots:{identity:false,bank:false,license:false},gasConfigured:false},csrf:'a'.repeat(64)};
-class Node {constructor(){this.innerHTML='';this.textContent='';this.hidden=false;this.disabled=false;this.value='';this.style={};this.classList={toggle(){}};this.listeners={};}addEventListener(e,fn){this.listeners[e]=fn;}querySelectorAll(){return [];}querySelector(){return new Node();}close(){this.open=false;}showModal(){this.open=true;}replaceChildren(){this.innerHTML='';}append(){} }
+class Node {constructor(){this.innerHTML='';this.textContent='';this.hidden=false;this.disabled=false;this.value='';this.style={};this.classList={toggle(){}};this.listeners={};}addEventListener(e,fn){this.listeners[e]=fn;}querySelectorAll(){return [];}querySelector(){return new Node();}close(){this.open=false;}showModal(){this.open=true;}replaceChildren(){this.innerHTML='';}append(){}scrollIntoView(){} }
 const nodes=new Map(),listeners={},get=id=>{if(!nodes.has(id))nodes.set(id,new Node());return nodes.get(id);};let heartbeat;
 const context={console,Intl,Date,Number,JSON,String,Object,Array,Set,FormData:class{},setInterval:fn=>{heartbeat=fn;},confirm:()=>true,fetch:async()=>({ok:true,json:async()=>fixtures}),document:{getElementById:get,addEventListener:(e,fn)=>listeners[e]=fn,querySelectorAll:()=>[],querySelector:()=>null,createElement:()=>new Node()}};
 vm.createContext(context);vm.runInContext(fs.readFileSync('public/app.js','utf8'),context);
@@ -47,6 +47,23 @@ vm.createContext(context);vm.runInContext(fs.readFileSync('public/app.js','utf8'
  const leavePayload={records:[{name:'測試',sourceSheet:'115',sourceRow:2}]};context.openForm('leave-import','',{payload:leavePayload,rows:[{name:'測試',sourceSheet:'115',sourceRow:2,reviewWarnings:['到職日需核對']}]});assert(get('form-fields').innerHTML.includes('到職日需核對'));
  context.fetch=async(path,options)=>{if(options?.method==='POST')sent.push({path,options});return {ok:true,json:async()=>path==='/api/leave/import'?{added:1,skipped:0}:fixtures};};
  await get('edit-form').listeners.submit({preventDefault(){},target:{}});assert.equal(sent.at(-1).path,'/api/leave/import');
+ // Successful save opens the saved history rather than hiding it behind filters.
+ context.fetch=async(path,options)=>({ok:true,json:async()=>options?.method==='POST'?{id:'candidate1'}:fixtures});
+ vm.runInContext("page='recruitment';candidateId=null;recruitFilters.status='放棄';",context);
+ context.openForm('candidate');formEntries=[['name','應徵測試'],['phone','0912345678']];
+ await get('edit-form').listeners.submit({preventDefault(){},target:{}});
+ assert.equal(vm.runInContext('candidateId',context),'candidate1');assert(get('content').innerHTML.includes('電話與面試完整歷程'));
+ // Server rejection keeps the entered fields and the form open with an error.
+ context.openForm('recruit-phone','candidate1');const draft=get('form-fields').innerHTML;
+ context.fetch=async()=>({ok:false,json:async()=>({error:'應徵者已更新，請重新整理後新增紀錄'})});
+ await get('edit-form').listeners.submit({preventDefault(){},target:{}});
+ assert(get('form-dialog').open);assert.equal(get('form-fields').innerHTML,draft);assert(get('form-error').textContent.includes('已更新'));
+ get('edit-form').listeners.invalid({target:{closest:()=>({firstChild:{textContent:'聯絡人'}}),validationMessage:'請填寫這個欄位。'}});
+ assert(get('form-error').textContent.includes('尚未儲存'));assert(get('form-error').textContent.includes('聯絡人'));
+ // A committed POST followed by a failed GET must not invite duplicate submission.
+ let posts=0;context.fetch=async(path,options)=>{if(options?.method==='POST'){posts++;return {ok:true,json:async()=>({id:'candidate1'})};}throw Error('offline');};
+ await get('edit-form').listeners.submit({preventDefault(){},target:{}});
+ assert.equal(posts,1);assert(!get('form-dialog').open);assert(get('message').textContent.includes('資料已儲存於NAS，但畫面更新失敗'));
  context.fetch=async()=>{throw Error('offline');};await heartbeat();assert(get('content').innerHTML.includes('公司網路連線中斷'));assert.equal(vm.runInContext('state',context),null);
  console.log('PASS: all application views, employee tabs/forms, escaped names, disconnect clears loaded data.');
 })().catch(e=>{console.error(e);process.exitCode=1;});

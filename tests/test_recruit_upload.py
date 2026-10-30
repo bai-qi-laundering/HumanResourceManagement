@@ -32,6 +32,38 @@ class RecruitmentUploadTests(unittest.TestCase):
         self.assertEqual(result['status'], 200, result)
         return result['data']
 
+    def test_other_tab_refresh_does_not_invalidate_open_recruitment_form(self):
+        original = self.csrf
+        c = self.new_candidate(notes='第一次輸入')
+        # Another tab refreshes repeatedly using this browser's shared cookie.
+        for _ in range(3):
+            self.assertEqual(self.call('/api/state')['data']['csrf'], original)
+        edited = self.call('/api/recruitment/candidate', {
+            **c, 'notes': '修改後保留',
+        }, headers={'HTTP_X_HR_CSRF': original})
+        self.assertEqual(edited['status'], 200, edited)
+        event = self.call('/api/recruitment/event', {
+            'candidateId': c['id'], 'revision': edited['data']['revision'],
+            'kind': 'phone', 'at': '2026-10-30T09:00',
+            'contactPerson': '測試聯絡人', 'outcome': '已接通',
+            'notes': '已安排面試', 'status': '待面試',
+        }, headers={'HTTP_X_HR_CSRF': original})
+        self.assertEqual(event['status'], 200, event)
+        # Read via a fresh Store connection: a successful POST really committed.
+        from server import Store
+        saved = Store(self.app.store.path).state({})
+        self.assertEqual(saved['candidates'][0]['notes'], '修改後保留')
+        self.assertEqual(saved['recruitmentEvents'][0]['notes'], '已安排面試')
+        self.assertEqual(self.call('/api/recruitment/candidate', {
+            **edited['data'], 'notes': '不可接受錯誤驗證碼',
+        }, headers={'HTTP_X_HR_CSRF': 'f' * 64})['status'], 403)
+
+    def test_invalid_state_cookie_replaced_with_valid_token(self):
+        for cookie in ['', 'hr_csrf=bad']:
+            response = self.call('/api/state', headers={'HTTP_COOKIE': cookie})
+            self.assertEqual(response['status'], 200)
+            self.assertRegex(response['data']['csrf'], r'^[a-f0-9]{64}$')
+
     def test_upload_versions_autobind_and_scan(self):
         self.emp()
         first, second = self.upload(name='../../fake.pdf'), self.upload()
